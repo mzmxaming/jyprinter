@@ -1,0 +1,19 @@
+# Windows 7 SP1 及以上系统可用的依赖版本（需用 Python 3.8 构建，见说明文档 4.5）
+#   <Python3.8>\python.exe -m venv .venv38
+#   .venv38\Scripts\python.exe -m pip install -r requirements-win7.txt
+#   .venv38\Scripts\python.exe -m PyInstaller --clean --noconfirm jyprinter.spec
+#
+# 说明：Python 3.9 及以上已不再支持 Windows 7，因此 Win7 兼容版必须使用 3.8 运行时，
+#       对应的第三方库也需要退到仍支持 3.8 的版本。
+Flask==3.0.3
+Werkzeug==3.0.6
+Jinja2==3.1.4
+itsdangerous==2.2.0
+click==8.1.7
+blinker==1.8.2
+pywin32==306
+Pillow==9.5.0
+pystray==0.19.5
+PyMuPDF==1.24.11
+qrcode==7.4.2
+pyinstaller==6.10.0

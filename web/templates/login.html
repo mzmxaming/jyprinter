@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>登录 · {{ brand.product }}</title>
+  <link rel="icon" href="{{ url_for('static', filename='favicon.ico') }}" type="image/x-icon">
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body class="login-body">
+  <form class="login-card" method="post" action="{{ url_for('login_submit') }}">
+    <h1><img class="brand-logo" src="{{ url_for('static', filename='logo.png') }}" alt="">{{ brand.product }}</h1>
+    <p class="login-sub">登录后即可上传文件、预览并静默打印</p>
+
+    <input type="hidden" name="next" value="{{ next_path }}">
+    {% if error %}<p class="login-error">{{ error }}</p>{% endif %}
+
+    <label class="field">
+      <span>用户名</span>
+      <input name="username" type="text" value="{{ username or '' }}" autocomplete="username" required autofocus>
+    </label>
+    <label class="field">
+      <span>密码</span>
+      <input name="password" type="password" autocomplete="current-password" required>
+    </label>
+
+    <button class="primary" type="submit">登 录</button>
+    <p class="login-hint">首次使用请用默认账号 <code>admin / admin123</code> 登录，并立即在页面右上角修改密码。</p>
+    <p class="login-dev">{{ brand.developer }}</p>
+    <p class="login-hint muted">v{{ brand.version }}　·　界面图标：Material Design Icons（Apache-2.0）</p>
+  </form>
+</body>
+</html>

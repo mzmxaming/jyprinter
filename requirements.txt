@@ -1,0 +1,6 @@
+Flask>=3.0
+pywin32>=306
+Pillow>=10.0
+pystray>=0.19
+PyMuPDF>=1.24,<2
+qrcode>=7.4

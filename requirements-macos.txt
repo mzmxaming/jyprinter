@@ -1,0 +1,24 @@
+# macOS（Apple Silicon / Intel）源码运行与打包环境依赖
+#
+# 用途：
+#   1. 在 Mac 上直接源码运行：python3 -m venv .venv-macos && .venv-macos/bin/pip install -r requirements-macos.txt
+#      .venv-macos/bin/python flet_app.py
+#   2. 构建 .app/.dmg：bash tools/build_macos.sh（脚本会自动创建 .venv-macos 并安装本文件）
+#
+# 说明：
+#   · flet 版本需与构建时使用的 CLI 一致，故此处固定版本；
+#   · 不包含 pywin32（仅 Windows 打印后端需要）与 pystray（macOS 版用 Flet 窗口代替托盘）；
+#   · 实际打包时 flet 优先读取 pyproject.toml 的 [project].dependencies，
+#     本文件不参与随包依赖安装，仅用于准备构建机环境。
+#
+# 系统级依赖（pip 无法提供）：
+#   Xcode 15+ / Command Line Tools   —— Flutter 构建 macOS 应用必需
+#   CUPS（自带 lp / lpstat / lpoptions）—— 打印后端
+#   LibreOffice（可选）              —— Office/WPS 文档转 PDF，缺失时仅影响办公格式
+flet==1.0.4
+Flask>=3.0
+Pillow>=10.0
+# PyMuPDF 2.0 依赖 onnxruntime / pymupdf-layout / pymupdf4llm 且要求 Python ≥3.11，
+# 在 macOS 上易因缺少轮子退化为源码编译而安装失败；本项目只用 1.x 的渲染 API，故限制大版本。
+PyMuPDF>=1.24,<2
+qrcode>=7.4

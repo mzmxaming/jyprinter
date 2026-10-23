@@ -1,0 +1,168 @@
+# =============================================================================
+# jyprinter 三平台云端编译打包（GitHub Actions）
+#
+# 触发方式：
+#   1. 手动：GitHub 仓库页面 → Actions → 左侧「三平台编译打包」→ Run workflow
+#   2. 发布：git tag v1.3.0 && git push origin v1.3.0
+#      → 编译完成后自动创建 Release 并附上全部安装包
+#
+# 产物（Actions 运行页 Artifacts 下载；打标签时同时进入 Release）：
+#   · jyprinter-windows-x64-<版本>       Windows 7 SP1+ 单文件 jyprinter.exe
+#   · jyprinter-linux-x86_64-<版本>      麒麟/Linux x86 电脑：tar.gz + .deb + .rpm
+#   · jyprinter-linux-arm64-<版本>       麒麟/Linux ARM64 国产电脑（飞腾/鲲鹏）：tar.gz + .deb + .rpm
+#   · jyprinter-macos-arm64-<版本>       Apple Silicon 用 .dmg
+#   · jyprinter-macos-x86_64-<版本>      Intel Mac 用 .dmg
+#
+# 关键点：
+#   · macOS 任务运行在 GitHub 的 macOS 15 运行器上，满足 Flet 1.0.4 内置
+#     Flutter 3.44.8「macOS 14+」的硬性要求 —— 本地老 Mac（macOS 11）不再是瓶颈；
+#   · Linux 任务在 ubuntu:20.04 容器内构建（glibc 2.31，与银河麒麟桌面 V10 同基线），
+#     避免在高版本 glibc 上构建出的二进制在麒麟上无法运行；
+#   · ARM64 版使用 GitHub 原生 ARM64 运行器（ubuntu-24.04-arm）构建 —— PyInstaller
+#     不支持交叉编译，必须同架构构建；该运行器对公开仓库免费，私有仓库需付费计划；
+#   · Windows 任务用 Python 3.8 构建，保证产物可在 Windows 7 SP1 运行。
+# =============================================================================
+
+name: 三平台编译打包
+
+on:
+  workflow_dispatch:          # 允许在网页上手动触发
+  push:
+    tags:
+      - 'v*'                  # 打 v 开头的标签时触发并发布 Release
+
+permissions:
+  contents: write             # release 任务需要写权限
+
+jobs:
+  # ------------------------------------------------------------ Windows exe
+  build-windows:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+
+      # Win7 兼容版必须用 Python 3.8 运行时（3.9+ 已不支持 Win7）
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.8'
+
+      - name: 安装打包依赖（requirements-win7.txt）
+        run: python -m pip install -r requirements-win7.txt
+
+      - name: 读取版本号
+        id: ver
+        shell: pwsh
+        run: |
+          $v = python -c "import sys; sys.path.insert(0, '.'); from core import settings; print(settings.VERSION)"
+          echo "VERSION=$v" >> $env:GITHUB_OUTPUT
+
+      - name: PyInstaller 打包单文件 exe
+        run: python -m PyInstaller --clean --noconfirm jyprinter.spec
+
+      - name: 上传 Windows 产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: jyprinter-windows-x64-${{ steps.ver.outputs.VERSION }}
+          path: dist/jyprinter.exe
+
+  # ------------------------------------------- Linux / 麒麟（x86_64 + ARM64）
+  build-linux:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # x86 架构麒麟/Linux 电脑
+          - { runner: ubuntu-latest,    arch: x86_64 }
+          # 飞腾/鲲鹏等 ARM64 国产电脑（GitHub 原生 ARM 运行器，公开仓库免费）
+          - { runner: ubuntu-24.04-arm, arch: arm64  }
+    runs-on: ${{ matrix.runner }}
+    # glibc 2.31，对齐银河麒麟桌面 V10（20.04 基线）；
+    # 该镜像为多架构镜像，在 ARM 运行器上自动拉取 arm64 变体
+    container: ubuntu:20.04
+    steps:
+      - name: 安装构建工具（git/python3/rpmbuild 等）
+        run: |
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y \
+            git python3 python3-venv python3-pip binutils rpm ca-certificates
+
+      - uses: actions/checkout@v4
+
+      # 依次产出：dist/jyprinter（单文件）、tar.gz 发行包、.deb、.rpm
+      - name: 构建单文件与 tar.gz 发行包
+        run: bash tools/build_linux.sh
+
+      - name: 构建 deb 安装包
+        run: bash tools/build_deb.sh
+
+      - name: 构建 rpm 安装包
+        run: bash tools/build_rpm.sh
+        # 若 rpmbuild 在 Ubuntu 容器内出现异常，可临时删除本步骤，不影响 tar.gz/deb
+
+      - name: 读取版本号
+        id: ver
+        run: |
+          V=$(python3 -c "import sys; sys.path.insert(0, '.'); from core import settings; print(settings.VERSION)")
+          echo "VERSION=$V" >> "$GITHUB_OUTPUT"
+
+      - name: 上传 Linux 产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: jyprinter-linux-${{ matrix.arch }}-${{ steps.ver.outputs.VERSION }}
+          path: |
+            dist/jyprinter-linux-*.tar.gz
+            dist/*.deb
+            dist/*.rpm
+
+  # ------------------------------------------------------------ macOS dmg（双架构）
+  build-macos:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: macos-15,       arch: arm64  }   # Apple Silicon (M 系列)
+          - { runner: macos-15-intel, arch: x86_64 }   # Intel Mac
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # pyproject.toml 要求 Python >=3.11,<3.14；setup-python 会把该版本放到 PATH 最前
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      # 首次构建 flet 会自动下载 Flutter SDK，耗时较长属正常
+      - name: 构建 .app 并制作 dmg
+        run: bash tools/build_macos.sh
+
+      - name: 按架构重命名 dmg 并读取版本号
+        id: ver
+        run: |
+          V=$(python3 -c "import sys; sys.path.insert(0, '.'); from core import settings; print(settings.VERSION)")
+          mv "dist/jyprinter-macos-${V}.dmg" "dist/jyprinter-macos-${V}-${{ matrix.arch }}.dmg"
+          echo "VERSION=$V" >> "$GITHUB_OUTPUT"
+
+      - name: 上传 macOS 产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: jyprinter-macos-${{ matrix.arch }}-${{ steps.ver.outputs.VERSION }}
+          path: dist/jyprinter-macos-*.dmg
+
+  # ------------------------------------------------------------ 打标签时发布 Release
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [build-windows, build-linux, build-macos]
+    runs-on: ubuntu-latest
+    steps:
+      - name: 汇总全部平台产物
+        uses: actions/download-artifact@v4
+        with:
+          pattern: jyprinter-*
+          merge-multiple: true
+          path: release
+
+      - name: 创建 Release 并附加产物
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release/**/*
+          generate_release_notes: true

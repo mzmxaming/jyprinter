@@ -1,0 +1,298 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{ brand.product }} v{{ brand.version }}</title>
+  <link rel="icon" href="{{ url_for('static', filename='favicon.ico') }}" type="image/x-icon">
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+  <header class="topbar">
+    <div class="topbar-inner">
+      <div class="brand">
+        <img class="brand-logo" src="{{ url_for('static', filename='logo.png') }}" alt="">
+        <div>
+          <h1>{{ brand.product }}</h1>
+          <p class="subtitle">上传文件即可静默打印到本机连接的打印机，无需安装驱动</p>
+        </div>
+      </div>
+      <div class="topbar-actions">
+        <code class="addr" title="{{ access.mode }}访问地址">{{ access.current_url }}</code>
+        {% if qr_available %}
+        <button id="show-qrcode" class="ghost small" type="button">手机扫码</button>
+        {% endif %}
+        <span class="badge role">{{ user.username }} ｜ {{ '管理员' if is_admin else '普通用户' }}</span>
+        <button id="change-password" class="ghost small" type="button">修改密码</button>
+        {% if is_admin %}<button id="manage-users" class="ghost small" type="button">用户管理</button>{% endif %}
+        <a class="ghost small link-out" href="{{ url_for('logout') }}">退出</a>
+      </div>
+    </div>
+  </header>
+
+  <main>
+    <section class="card">
+      <h2>上传并打印</h2>
+
+      <div id="dropzone" class="dropzone">
+        <p class="dropzone-title">把文件拖到这里，或点击选择文件</p>
+        <p class="dropzone-hint">
+          支持 {{ supported|length }} 种格式：PDF、图片、Office、WPS、文本；
+          Office / WPS 文档由本机办公软件自动转换后静默打印，可一次选择多个文件
+        </p>
+        <input id="file-input" type="file" multiple hidden>
+      </div>
+
+      <ul id="file-list" class="file-list"></ul>
+
+      <div class="params">
+        <label class="field">
+          <span>打印机</span>
+          <select id="printer"></select>
+        </label>
+        <label class="field">
+          <span>纸张</span>
+          <select id="paper"></select>
+        </label>
+        <label class="field">
+          <span>单双面</span>
+          <select id="duplex">
+            <option value="simplex">单面</option>
+            <option value="vertical">双面（长边翻转）</option>
+          </select>
+        </label>
+        <label class="field narrow">
+          <span>份数</span>
+          <input id="copies" type="number" min="1" max="99" value="{{ config.copies }}">
+        </label>
+      </div>
+
+      <div class="params">
+        <label class="field">
+          <span>页面范围</span>
+          <input id="page-range" type="text" placeholder="全部，如 1-3,5 或 2-" value="{{ config.page_range }}">
+        </label>
+        <label class="field">
+          <span>缩放</span>
+          <select id="scale">
+            <option value="fit">适应页面</option>
+            <option value="actual">实际大小（100%）</option>
+            <option value="custom">自定义比例</option>
+          </select>
+        </label>
+        <label class="field narrow">
+          <span>比例 %</span>
+          <input id="scale-percent" type="number" min="10" max="400" step="5" value="{{ config.scale_percent }}">
+        </label>
+        <label class="field">
+          <span>颜色</span>
+          <select id="color">
+            <option value="color">彩色</option>
+            <option value="mono">黑白</option>
+          </select>
+        </label>
+        <label class="field">
+          <span>打印质量</span>
+          <select id="quality">
+            <option value="draft">草稿（150 DPI）</option>
+            <option value="normal">标准（300 DPI）</option>
+            <option value="high">高清（600 DPI）</option>
+          </select>
+        </label>
+      </div>
+
+      <div class="params">
+        <label class="check">
+          <input id="require-confirmation" type="checkbox"{% if config.require_confirmation %} checked{% endif %}>
+          <span>先预览确认再打印</span>
+        </label>
+        <button id="submit" class="primary" type="button">提交打印任务</button>
+      </div>
+
+      <p id="printer-note" class="note"></p>
+      <p id="paper-note" class="note" hidden></p>
+    </section>
+
+    <details id="info-card" class="card info-card">
+      <summary>运行信息 · 访问地址 / 支持格式 / 转换引擎</summary>
+      <div class="info-body">
+        <div class="info-row">
+          <span class="label">访问方式</span>
+          <span class="badge role">{{ access.mode }}</span>
+          <code class="addr">{{ access.current_url }}</code>
+          {% if access.all_urls|length > 1 %}
+          <span class="label">其他地址</span>
+          {% for addr in access.all_urls[1:] %}<code class="addr">{{ addr }}</code>{% endfor %}
+          {% endif %}
+        </div>
+
+        <div class="info-block">
+          <span class="label">支持格式（共 {{ supported|length }} 种）</span>
+          <div class="tags">
+            {% for ext in supported %}<span class="tag{% if ext in unavailable %} muted{% endif %}">.{{ ext }}</span>{% endfor %}
+          </div>
+        </div>
+
+        {% if engines %}
+        <div class="info-block">
+          <span class="label">文档转换引擎</span>
+          <div class="tags">
+            {% for family, name in engines.items() %}<span class="tag engine">{{ name }}</span>{% endfor %}
+          </div>
+        </div>
+        {% endif %}
+
+        {% if unavailable %}
+        <p class="note error">灰色格式本机暂不可用：未检测到对应的 Office / WPS 引擎，请安装后再试。</p>
+        {% endif %}
+      </div>
+    </details>
+
+    <section class="card">
+      <div class="card-head">
+        <h2>打印队列</h2>
+        <button id="refresh" class="ghost" type="button">刷新</button>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>文件</th>
+              <th>大小</th>
+              <th>参数</th>
+              <th>客户端</th>
+              <th>状态</th>
+              <th>提交时间</th>
+              <th>操作</th>
+            </tr>
+          </thead>
+          <tbody id="task-body">
+            <tr class="empty"><td colspan="7">暂无打印任务</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="card">
+      <div class="card-head">
+        <h2>打印日志</h2>
+        <span class="note">保留最近 {{ config.log_keep_days }} 天，每天自动清理</span>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>时间</th>
+              <th>客户端</th>
+              <th>文件</th>
+              <th>参数</th>
+              <th>打印机</th>
+              <th>状态</th>
+              <th>说明</th>
+            </tr>
+          </thead>
+          <tbody id="log-body">
+            <tr class="empty"><td colspan="7">暂无日志</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+
+  <footer class="page-footer">
+    <p class="dev-line">{{ brand.developer }}</p>
+    <p class="note">{{ brand.product }} v{{ brand.version }}　·　界面图标：Material Design Icons（Apache-2.0）</p>
+  </footer>
+
+  <div id="preview-modal" class="modal hidden">
+    <div class="modal-box">
+      <div class="modal-head">
+        <h3 id="preview-title">文档预览</h3>
+        <button id="preview-close" class="ghost" type="button">关闭</button>
+      </div>
+      <p id="preview-meta" class="note"></p>
+      <div id="preview-grid" class="preview-grid"></div>
+    </div>
+  </div>
+
+  <div id="password-modal" class="modal hidden">
+    <div class="modal-box narrow-box">
+      <div class="modal-head">
+        <h3>修改密码</h3>
+        <button id="password-close" class="ghost" type="button">关闭</button>
+      </div>
+      <p class="note">当前账号：{{ user.username }}</p>
+      <label class="field"><span>原密码</span><input id="old-password" type="password" autocomplete="current-password"></label>
+      <label class="field"><span>新密码（至少 6 位）</span><input id="new-password" type="password" autocomplete="new-password"></label>
+      <div class="modal-actions">
+        <button id="password-submit" class="primary" type="button">保存</button>
+      </div>
+    </div>
+  </div>
+
+  {% if is_admin %}
+  <div id="users-modal" class="modal hidden">
+    <div class="modal-box narrow-box">
+      <div class="modal-head">
+        <h3>用户管理</h3>
+        <button id="users-close" class="ghost" type="button">关闭</button>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr><th>账号</th><th>角色</th><th>最近登录</th><th>操作</th></tr>
+          </thead>
+          <tbody id="users-body">
+            <tr class="empty"><td colspan="4">加载中…</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="user-create">
+        <label class="field"><span>新账号</span><input id="new-username" type="text" placeholder="3-32 位字母/数字/_-"></label>
+        <label class="field"><span>初始密码</span><input id="new-user-password" type="password" placeholder="至少 6 位"></label>
+        <label class="field"><span>角色</span>
+          <select id="new-user-role">
+            <option value="user">普通用户</option>
+            <option value="admin">管理员</option>
+          </select>
+        </label>
+        <button id="create-user" class="primary" type="button">创建账号</button>
+      </div>
+    </div>
+  </div>
+  {% endif %}
+
+  {% if qr_available %}
+  <div id="qr-modal" class="modal hidden">
+    <div class="modal-box narrow-box qr-box">
+      <div class="modal-head">
+        <h3>手机扫码访问</h3>
+        <button id="qr-close" class="ghost" type="button">关闭</button>
+      </div>
+      <p class="note">用手机浏览器扫码即可打开本服务（手机需与本机网络互通；内网穿透时请用穿透地址）。</p>
+      <div class="qr-wrap"><img id="qr-image" alt="访问二维码"></div>
+      <p class="note mono" id="qr-url"></p>
+    </div>
+  </div>
+  {% endif %}
+
+  <div id="toast" class="toast"></div>
+
+  <script>
+    window.JY_DEFAULT_PAPER = {{ config.paper | tojson }};
+    window.JY_DEFAULT_DUPLEX = {{ config.duplex | tojson }};
+    window.JY_DEFAULT_PRINTER = {{ config.printer | tojson }};
+    window.JY_DEFAULT_PAGE_RANGE = {{ config.page_range | tojson }};
+    window.JY_DEFAULT_SCALE = {{ config.scale | tojson }};
+    window.JY_DEFAULT_SCALE_PERCENT = {{ config.scale_percent | tojson }};
+    window.JY_DEFAULT_COLOR = {{ config.color | tojson }};
+    window.JY_DEFAULT_QUALITY = {{ config.quality | tojson }};
+    window.JY_REQUIRE_CONFIRMATION = {{ config.require_confirmation | tojson }};
+    window.JY_IS_ADMIN = {{ is_admin | tojson }};
+    window.JY_USERNAME = {{ user.username | tojson }};
+    window.JY_QR_AVAILABLE = {{ qr_available | tojson }};
+    window.JY_ACCESS_URLS = {{ access.all_urls | tojson }};
+  </script>
+  <script src="{{ url_for('static', filename='app.js') }}"></script>
+</body>
+</html>

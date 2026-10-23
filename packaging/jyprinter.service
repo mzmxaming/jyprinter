@@ -1,0 +1,26 @@
+[Unit]
+Description=网络打印服务（jyprinter 局域网文件静默打印）
+Documentation=file:///opt/jyprinter
+After=network-online.target cups.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+# 专用系统用户运行，避免以 root 常驻
+User=jyprinter
+Group=jyprinter
+WorkingDirectory=/opt/jyprinter
+# deb/rpm 安装时程序目录只读，可写数据统一放这里
+Environment=JYPRINTER_DATA_DIR=/var/lib/jyprinter
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/jyprinter/jyprinter --no-tray
+Restart=always
+RestartSec=5
+# 只保留不影响文件与套接字访问的加固项，避免与 CUPS 客户端/驱动冲突
+NoNewPrivileges=true
+PrivateTmp=true
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
