@@ -1,8 +1,8 @@
 # =============================================================================
-# jyprinter 三平台云端编译打包（GitHub Actions）
+# jyprinter 云端编译打包（GitHub Actions）
 #
 # 触发方式：
-#   1. 手动：GitHub 仓库页面 → Actions → 左侧「三平台编译打包」→ Run workflow
+#   1. 手动：GitHub 仓库页面 → Actions → 左侧「双平台编译打包」→ Run workflow
 #   2. 发布：git tag v1.3.0 && git push origin v1.3.0
 #      → 编译完成后自动创建 Release 并附上全部安装包
 #
@@ -10,12 +10,11 @@
 #   · jyprinter-windows-x64-<版本>       Windows 7 SP1+ 单文件 jyprinter.exe
 #   · jyprinter-linux-x86_64-<版本>      麒麟/Linux x86 电脑：tar.gz + .deb + .rpm
 #   · jyprinter-linux-arm64-<版本>       麒麟/Linux ARM64 国产电脑（飞腾/鲲鹏）：tar.gz + .deb + .rpm
-#   · jyprinter-macos-arm64-<版本>       Apple Silicon 用 .dmg
-#   · jyprinter-macos-x86_64-<版本>      Intel Mac 用 .dmg
+#
+# 说明：macOS 版（Flet 桌面壳）未纳入流水线，需在 macOS 14+ 的机器上执行
+#       tools/build_macos.sh 本地构建（Flet 内置 Flutter 3.44.8 硬性要求 macOS 14+）。
 #
 # 关键点：
-#   · macOS 任务运行在 GitHub 的 macOS 15 运行器上，满足 Flet 1.0.4 内置
-#     Flutter 3.44.8「macOS 14+」的硬性要求 —— 本地老 Mac（macOS 11）不再是瓶颈；
 #   · Linux 任务在 ubuntu:20.04 容器内构建（glibc 2.31，与银河麒麟桌面 V10 同基线），
 #     避免在高版本 glibc 上构建出的二进制在麒麟上无法运行；
 #   · ARM64 版使用 GitHub 原生 ARM64 运行器（ubuntu-24.04-arm）构建 —— PyInstaller
@@ -23,7 +22,7 @@
 #   · Windows 任务用 Python 3.8 构建，保证产物可在 Windows 7 SP1 运行。
 # =============================================================================
 
-name: 三平台编译打包
+name: 双平台编译打包
 
 on:
   workflow_dispatch:          # 允许在网页上手动触发
@@ -114,44 +113,10 @@ jobs:
             dist/*.deb
             dist/*.rpm
 
-  # ------------------------------------------------------------ macOS dmg（双架构）
-  build-macos:
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - { runner: macos-15,       arch: arm64  }   # Apple Silicon (M 系列)
-          - { runner: macos-15-intel, arch: x86_64 }   # Intel Mac
-    runs-on: ${{ matrix.runner }}
-    steps:
-      - uses: actions/checkout@v4
-
-      # pyproject.toml 要求 Python >=3.11,<3.14；setup-python 会把该版本放到 PATH 最前
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.13'
-
-      # 首次构建 flet 会自动下载 Flutter SDK，耗时较长属正常
-      - name: 构建 .app 并制作 dmg
-        run: bash tools/build_macos.sh
-
-      - name: 按架构重命名 dmg 并读取版本号
-        id: ver
-        run: |
-          V=$(python3 -c "import sys; sys.path.insert(0, '.'); from core import settings; print(settings.VERSION)")
-          mv "dist/jyprinter-macos-${V}.dmg" "dist/jyprinter-macos-${V}-${{ matrix.arch }}.dmg"
-          echo "VERSION=$V" >> "$GITHUB_OUTPUT"
-
-      - name: 上传 macOS 产物
-        uses: actions/upload-artifact@v4
-        with:
-          name: jyprinter-macos-${{ matrix.arch }}-${{ steps.ver.outputs.VERSION }}
-          path: dist/jyprinter-macos-*.dmg
-
   # ------------------------------------------------------------ 打标签时发布 Release
   release:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [build-windows, build-linux, build-macos]
+    needs: [build-windows, build-linux]
     runs-on: ubuntu-latest
     steps:
       - name: 汇总全部平台产物
