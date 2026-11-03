@@ -1,0 +1,10 @@
+# 移动端客户端（iOS / 桌面调试）构建环境依赖
+#
+# 用途：
+#   · 构建 iOS 安装包：bash tools/build_ios.sh（必须在 macOS 上执行）
+#   · 桌面调试：.venv-ios/bin/flet run flet_client.py
+#
+# 说明：客户端只需要 Flet 运行时与 HTTP 依赖，不需要 Flask / PyMuPDF / Pillow，
+#       因此不引用 requirements-macos.txt。
+flet==1.0.4
+requests>=2.31
