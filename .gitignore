@@ -13,8 +13,9 @@ build/
 dist/
 
 # ---- 运行时数据（含 secret.key / users.json 等敏感信息，严禁入库）----
-data/
-config.json
+# 必须用根目录锚定，否则会连带忽略 Android 源码里的 com/cgm/jyprinter/data/ 包
+/data/
+/config.json
 
 # ---- 日志 ----
 *.log
