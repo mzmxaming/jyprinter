@@ -9,6 +9,7 @@ import com.cgm.jyprinter.data.Paper
 import com.cgm.jyprinter.data.PendingFile
 import com.cgm.jyprinter.data.Prefs
 import com.cgm.jyprinter.data.PrintOptions
+import com.cgm.jyprinter.data.PrintStats
 import com.cgm.jyprinter.data.Printer
 import com.cgm.jyprinter.data.PrintTask
 import kotlinx.coroutines.Job
@@ -42,9 +43,13 @@ import java.io.File
  * @param scalePercent 自定义缩放百分比
  * @param color color / mono
  * @param quality draft / normal / high
+ * @param orientation auto / portrait / landscape
+ * @param fitTable 表格类文档是否设为「适应一页宽」
  * @param pendingFile 待打印文件
  * @param tasks 最近任务
+ * @param stats 打印量统计（非管理员为 null）
  * @param printing 正在上传并提交打印
+ * @param splitting 正在执行 A3→A4 拆分
  * @param loadingTasks 正在刷新任务
  * @param message 一次性提示（Snackbar）
  */
@@ -68,9 +73,13 @@ data class UiState(
     val scalePercent: Int = 100,
     val color: String = "color",
     val quality: String = "normal",
+    val orientation: String = "auto",
+    val fitTable: Boolean = true,
     val pendingFile: PendingFile? = null,
     val tasks: List<PrintTask> = emptyList(),
+    val stats: PrintStats? = null,
     val printing: Boolean = false,
+    val splitting: Boolean = false,
     val loadingTasks: Boolean = false,
     val message: String? = null,
 ) {
@@ -200,6 +209,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             serverUrl = api.baseUrl,
         )
         loadPrinters()
+        loadStats()
         refreshTasks()
     }
 
@@ -435,6 +445,85 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     /**
+     * 设置出纸方向。
+     *
+     * @param value auto / portrait / landscape
+     * @return 无
+     */
+    fun setOrientation(value: String) {
+        _state.value = _state.value.copy(orientation = value)
+    }
+
+    /**
+     * 设置表格文档是否适应一页宽。
+     *
+     * @param value 是否启用
+     * @return 无
+     */
+    fun setFitTable(value: Boolean) {
+        _state.value = _state.value.copy(fitTable = value)
+    }
+
+    /**
+     * 查询打印量统计（仅管理员可见，失败时静默隐藏）。
+     *
+     * @return 无
+     */
+    fun loadStats() {
+        if (!_state.value.loggedIn) return
+        viewModelScope.launch {
+            runCatching { api.stats() }
+                .onSuccess { data -> _state.value = _state.value.copy(stats = data) }
+        }
+    }
+
+    /**
+     * 把当前 PDF 按给定比例拆分为 A4（服务端矢量裁剪），结果替换为新的待打印文件。
+     *
+     * @param ratios 每页的裁切比例，如 [0.5] 表示对半拆、[0.33, 0.66] 表示三等分
+     * @return 无
+     */
+    fun splitA3(ratios: List<Double>) {
+        val current = _state.value
+        val pending = current.pendingFile ?: return
+        if (pending.ext != "pdf") {
+            postMessage("A3 拆分仅支持 PDF 文件")
+            return
+        }
+        if (ratios.isEmpty() || ratios.any { it <= 0.0 || it >= 1.0 }) {
+            postMessage("裁切比例需在 0 与 1 之间")
+            return
+        }
+        // 服务端按「每页一个比例数组」解析，缺省页会当作整页；
+        // 这里按同一比例重复足够多次，覆盖任意页数（多余项服务端会忽略）
+        val one = ratios.joinToString(",") { it.toString() }
+        val cuts = (1..500).joinToString(",", "[", "]") { "[$one]" }
+
+        viewModelScope.launch {
+            _state.value = _state.value.copy(splitting = true)
+            runCatching { api.splitPdf(pending.file, pending.displayName, cuts) }
+                .onSuccess { bytes ->
+                    val context = getApplication<Application>()
+                    val dir = File(context.cacheDir, "incoming").apply { mkdirs() }
+                    val base = pending.displayName.substringBeforeLast('.', pending.displayName)
+                    val output = File(dir, "${System.currentTimeMillis()}_${base}_A4.pdf")
+                    output.writeBytes(bytes)
+                    _state.value = _state.value.copy(
+                        splitting = false,
+                        pendingFile = PendingFile(output, "${base}_A4.pdf", output.length(), false),
+                        message = "已拆分为 A4（矢量），可直接打印",
+                    )
+                }
+                .onFailure { error ->
+                    _state.value = _state.value.copy(
+                        splitting = false,
+                        message = error.message ?: "拆分失败",
+                    )
+                }
+        }
+    }
+
+    /**
      * 提交打印。
      *
      * @return 无
@@ -457,6 +546,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             scalePercent = if (current.scale == "custom") current.scalePercent else 100,
             color = current.color,
             quality = current.quality,
+            orientation = current.orientation,
+            fitTable = current.fitTable,
         )
         viewModelScope.launch {
             _state.value = _state.value.copy(printing = true)
