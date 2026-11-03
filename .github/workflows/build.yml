@@ -170,13 +170,15 @@ jobs:
           path: dist/android/*.apk
 
   # ------------------------------------------------------------ macOS dmg（双架构）
+  # 必须用 macOS 26 运行器：Flet 1.0.4 依赖的 connectivity_plus 7.3.1 使用了
+  # NWPath.isUltraConstrained（仅 macOS 26 SDK 提供），Xcode 16.4 下编译失败。
   build-macos:
     strategy:
       fail-fast: false
       matrix:
         include:
-          - { runner: macos-15,       arch: arm64  }   # Apple Silicon
-          - { runner: macos-15-intel, arch: x86_64 }   # Intel
+          - { runner: macos-26,       arch: arm64  }   # Apple Silicon
+          - { runner: macos-26-intel, arch: x86_64 }   # Intel
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
@@ -204,7 +206,7 @@ jobs:
 
   # ------------------------------------------------------------ iOS 客户端 IPA
   build-ios:
-    runs-on: macos-15
+    runs-on: macos-26
     steps:
       - uses: actions/checkout@v4
 
