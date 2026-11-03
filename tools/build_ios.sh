@@ -128,13 +128,24 @@ fi
 
 [ -n "${IPA}" ] && [ -f "${IPA}" ] || die "构建结束但未找到 IPA，请检查 ${OUT_DIR} 与 ${STAGING}/build/ios"
 
+# 已签名构建时 flet 产出的是 <构件名>.ipa（如 jyprinter_client.ipa），统一改成可读名称
+if [ "$(basename "${IPA}")" != "${APP_NAME}-ios-${VERSION}-unsigned.ipa" ]; then
+    TARGET="${OUT_DIR}/${APP_NAME}-ios-${VERSION}.ipa"
+    if [ "${IPA}" != "${TARGET}" ]; then
+        mv -f "${IPA}" "${TARGET}"
+        IPA="${TARGET}"
+    fi
+fi
+
 ok "构建完成"
 echo "  iOS 安装包 : ${IPA}（$(du -h "${IPA}" | cut -f1)）"
 echo
-echo "  安装方式："
-echo "    1) 未签名 IPA：用 Sideloadly（Windows/Mac）或 AltStore 以免费 Apple ID 签名安装，"
-echo "       有效期为 7 天，到期重新签名即可；"
-echo "    2) 已签名 IPA：配置 IOS_TEAM_ID / IOS_SIGNING_CERTIFICATE / IOS_PROVISIONING_PROFILE 后重新构建，"
-echo "       可用 Apple Configurator、Xcode Devices 或 TestFlight 安装。"
+if [[ "$(basename "${IPA}")" == *"-unsigned.ipa" ]]; then
+    echo "  安装方式：未签名 IPA，用 Sideloadly（Windows/Mac）或 AltStore 以免费 Apple ID 签名安装，"
+    echo "            有效期 7 天，到期重新签名即可。"
+else
+    echo "  安装方式：已签名 IPA，可用 Apple Configurator、Xcode Devices 或 TestFlight 安装；"
+    echo "            目标设备的 UDID 必须在描述文件的 ProvisionedDevices 中。"
+fi
 echo
 echo "  首次打开需允许「本地网络」权限，否则无法连接局域网打印服务。"
