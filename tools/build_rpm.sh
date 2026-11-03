@@ -124,6 +124,7 @@ Source1:        ${SERVICE_NAME}
 rm -rf %{buildroot}
 mkdir -p %{buildroot}/opt/${PKG}/assets %{buildroot}/opt/${PKG}/tools \\
          %{buildroot}%{_bindir} %{buildroot}%{_unitdir} \\
+         %{buildroot}/var/lib/${PKG} \\
          %{buildroot}%{_datadir}/icons/hicolor/256x256/apps \\
          %{buildroot}%{_datadir}/icons/hicolor/128x128/apps
 
