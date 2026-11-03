@@ -241,7 +241,11 @@ jobs:
           mkdir -p ~/Library/MobileDevice/Provisioning\ Profiles
           if [ -n "$PROFILE" ]; then
             echo "$PROFILE" | base64 --decode > /tmp/profile.mobileprovision
-            cp /tmp/profile.mobileprovision ~/Library/MobileDevice/Provisioning\ Profiles/
+            # Xcode 只按「UUID.mobileprovision」的文件名识别描述文件，必须重命名后安装
+            security cms -D -i /tmp/profile.mobileprovision > /tmp/profile.plist
+            UUID=$(/usr/libexec/PlistBuddy -c "Print :UUID" /tmp/profile.plist)
+            cp /tmp/profile.mobileprovision ~/Library/MobileDevice/Provisioning\ Profiles/"$UUID".mobileprovision
+            echo "已安装描述文件：$UUID"
           fi
 
       - name: 构建 iOS 安装包
