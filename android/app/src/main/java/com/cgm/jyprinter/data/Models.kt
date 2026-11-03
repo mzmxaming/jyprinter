@@ -123,6 +123,36 @@ data class PrintTask(
 )
 
 /**
+ * 单个统计窗口（今日 / 近 7 天 / 近 30 天 / 累计）。
+ *
+ * @param label 窗口名称
+ * @param tasks 已完成任务数
+ * @param copies 累计份数
+ * @param pages 累计打印页数
+ * @param sheets 估算用纸张数
+ */
+data class StatBucket(
+    val label: String,
+    val tasks: Int,
+    val copies: Int,
+    val pages: Int,
+    val sheets: Int,
+)
+
+/**
+ * 打印量统计（服务端 `/api/stats`，仅管理员可见）。
+ *
+ * @param today 今日
+ * @param week 近 7 天
+ * @param month 近 30 天
+ */
+data class PrintStats(
+    val today: StatBucket,
+    val week: StatBucket,
+    val month: StatBucket,
+)
+
+/**
  * 业务异常：携带可直接展示给用户的中文提示。
  *
  * @param text 提示文案
