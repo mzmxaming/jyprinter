@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- 上方进纸 -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M40,26 L68,26 A4,4 0 0 1 72,30 L72,44 L36,44 L36,30 A4,4 0 0 1 40,26 Z" />
+
+    <!-- 打印机机身 -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M32,48 L76,48 A6,6 0 0 1 82,54 L82,70 A6,6 0 0 1 76,76 L32,76 A6,6 0 0 1 26,70 L26,54 A6,6 0 0 1 32,48 Z" />
+
+    <!-- 出纸口 -->
+    <path
+        android:fillColor="#16537E"
+        android:pathData="M40,60 L68,60 A3,3 0 0 1 71,63 L71,72 A3,3 0 0 1 68,75 L40,75 A3,3 0 0 1 37,72 L37,63 A3,3 0 0 1 40,60 Z" />
+
+    <!-- 出纸 -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M42,64 L66,64 L66,82 A2,2 0 0 1 64,84 L44,84 A2,2 0 0 1 42,82 Z" />
+
+    <!-- 指示灯 -->
+    <path
+        android:fillColor="#3DDC97"
+        android:pathData="M74,53 m-3,0 a3,3 0 1,0 6,0 a3,3 0 1,0 -6,0" />
+</vector>

@@ -18,3 +18,11 @@ config.json
 
 # ---- 日志 ----
 *.log
+
+# ---- Android 工程 ----
+android/.gradle/
+android/.idea/
+android/local.properties
+android/.kotlin/
+*.iml
+*.hprof
