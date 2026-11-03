@@ -127,12 +127,19 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      # 安装 Android 命令行工具并接受 SDK 许可
-      - uses: android-actions/setup-android@v3
-
-      # 显式安装编译所需的平台与构建工具，避免依赖 AGP 自动下载
-      - name: 安装 Android SDK 平台与构建工具
-        run: sdkmanager "platforms;android-34" "build-tools;34.0.0"
+      # ubuntu-latest 运行器已预装 Android SDK；直接使用 ANDROID_HOME，
+      # 不再依赖 android-actions/setup-android（其在新版镜像上会报 Failed to find package 'tools'）
+      - name: 准备 Android SDK
+        run: |
+          echo "ANDROID_HOME=$ANDROID_HOME"
+          echo "sdk.dir=$ANDROID_HOME" > android/local.properties
+          SDKM="$(command -v sdkmanager || true)"
+          if [ -z "$SDKM" ]; then
+            SDKM="$(ls -d "$ANDROID_HOME"/cmdline-tools/*/bin/sdkmanager 2>/dev/null | head -n1)"
+          fi
+          echo "sdkmanager=$SDKM"
+          yes | "$SDKM" --licenses >/dev/null 2>&1 || true
+          "$SDKM" "platforms;android-34" "build-tools;34.0.0"
 
       # 直接指定 Gradle 版本，不走 wrapper 里的国内镜像地址
       - uses: gradle/actions/setup-gradle@v4
