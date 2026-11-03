@@ -64,6 +64,8 @@ mkdir -p "${SRCDIR}/assets" "${SRCDIR}/tools" \
 
 install -m 0755 "${BIN}" "${SRCDIR}/${PKG}"
 install -m 0644 "${ROOT}/assets/jyprinter.png" "${SRCDIR}/assets/jyprinter.png"
+# %install 阶段需要 128×128 图标，必须一并放入源码目录，否则 rpmbuild 在 %install 报 bad exit status
+install -m 0644 "${ROOT}/assets/jyprinter-128.png" "${SRCDIR}/assets/jyprinter-128.png"
 if [ -f "${ROOT}/assets/jyprinter.ico" ]; then
     install -m 0644 "${ROOT}/assets/jyprinter.ico" "${SRCDIR}/assets/jyprinter.ico"
 fi
