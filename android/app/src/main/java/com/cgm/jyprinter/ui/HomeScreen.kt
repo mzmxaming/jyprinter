@@ -24,6 +24,7 @@ import androidx.compose.material.icons.rounded.FolderOpen
 import androidx.compose.material.icons.rounded.Print
 import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Settings
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
@@ -34,11 +35,13 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
@@ -57,7 +60,9 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.cgm.jyprinter.data.PrintStats
 import com.cgm.jyprinter.data.PrintTask
+import com.cgm.jyprinter.data.StatBucket
 import com.cgm.jyprinter.ui.theme.BrandBlue
 import com.cgm.jyprinter.vm.MainViewModel
 import com.cgm.jyprinter.vm.UiState
@@ -84,6 +89,7 @@ fun HomeScreen(
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     var showSettings by remember { mutableStateOf(false) }
+    var showSplit by remember { mutableStateOf(false) }
 
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         if (uri == null) return@rememberLauncherForActivityResult
@@ -169,6 +175,7 @@ fun HomeScreen(
                     state = state,
                     onPick = { picker.launch(arrayOf("*/*")) },
                     onClear = vm::clearPendingFile,
+                    onSplit = { showSplit = true },
                 )
             }
 
@@ -206,7 +213,21 @@ fun HomeScreen(
             }
 
             item { TasksCard(state = state, vm = vm) }
+
+            state.stats?.let { stats ->
+                item { StatsCard(stats = stats) }
+            }
         }
+    }
+
+    if (showSplit) {
+        A3SplitDialog(
+            onDismiss = { showSplit = false },
+            onConfirm = { ratios ->
+                showSplit = false
+                vm.splitA3(ratios)
+            },
+        )
     }
 
     if (showSettings) {
@@ -238,6 +259,7 @@ private fun PendingFileCard(
     state: UiState,
     onPick: () -> Unit,
     onClear: () -> Unit,
+    onSplit: () -> Unit,
 ) {
     SectionCard(
         title = "待打印文件",
@@ -302,6 +324,19 @@ private fun PendingFileCard(
             }
             IconButton(onClick = onClear) {
                 Icon(Icons.Rounded.Close, contentDescription = "移除文件")
+            }
+        }
+        if (file.ext == "pdf") {
+            TextButton(onClick = onSplit, enabled = !state.splitting) {
+                if (state.splitting) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(16.dp),
+                        strokeWidth = 2.dp,
+                    )
+                    Text(text = "正在拆分…", modifier = Modifier.padding(start = 6.dp))
+                } else {
+                    Text(text = "A3 拆成 A4（矢量）")
+                }
             }
         }
     }
@@ -425,6 +460,37 @@ private fun PrintOptionsCard(state: UiState, vm: MainViewModel) {
             selected = state.quality,
             onSelect = vm::setQuality,
         )
+
+        Spacer(modifier = Modifier.height(14.dp))
+
+        OptionLabel("出纸方向")
+        SegmentedRow(
+            options = listOf("auto" to "自动", "portrait" to "纵向", "landscape" to "横向"),
+            selected = state.orientation,
+            onSelect = vm::setOrientation,
+        )
+
+        Spacer(modifier = Modifier.height(14.dp))
+
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween,
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = "表格适应一页宽",
+                    style = MaterialTheme.typography.bodyMedium,
+                    fontWeight = FontWeight.Medium,
+                )
+                Text(
+                    text = "Office / WPS 表格转换时按页宽缩放（仅 Windows）",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            Switch(checked = state.fitTable, onCheckedChange = vm::setFitTable)
+        }
     }
 }
 
@@ -536,4 +602,135 @@ private fun TaskRow(task: PrintTask, vm: MainViewModel) {
             }
         }
     }
+}
+
+/**
+ * 打印统计卡片（仅管理员可见，服务端返回 403 时整卡隐藏）。
+ *
+ * @param stats 统计数据
+ * @return 无
+ */
+@Composable
+private fun StatsCard(stats: PrintStats) {
+    SectionCard(title = "打印统计", subtitle = "只统计已完成任务，纸张数按单双面估算") {
+        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            StatCell(bucket = stats.today, modifier = Modifier.weight(1f))
+            StatCell(bucket = stats.week, modifier = Modifier.weight(1f))
+            StatCell(bucket = stats.month, modifier = Modifier.weight(1f))
+        }
+    }
+}
+
+/**
+ * 单个统计窗口。
+ *
+ * @param bucket 统计桶
+ * @param modifier 布局修饰符
+ * @return 无
+ */
+@Composable
+private fun StatCell(bucket: StatBucket, modifier: Modifier = Modifier) {
+    Surface(
+        modifier = modifier,
+        shape = RoundedCornerShape(16.dp),
+        color = MaterialTheme.colorScheme.surfaceVariant,
+    ) {
+        Column(modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp)) {
+            Text(
+                text = bucket.label,
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Text(
+                text = "${bucket.pages}",
+                style = MaterialTheme.typography.titleLarge,
+                fontWeight = FontWeight.SemiBold,
+                modifier = Modifier.padding(top = 2.dp),
+            )
+            Text(
+                text = "${bucket.sheets} 张纸 · ${bucket.copies} 份",
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+    }
+}
+
+/**
+ * A3→A4 拆分对话框：选择裁切方式后提交服务端矢量拆分。
+ *
+ * @param onDismiss 取消回调
+ * @param onConfirm 确认回调，参数为每页裁切比例
+ * @return 无
+ */
+@Composable
+private fun A3SplitDialog(
+    onDismiss: () -> Unit,
+    onConfirm: (List<Double>) -> Unit,
+) {
+    var mode by remember { mutableStateOf("half") }
+    var custom by remember { mutableStateOf("") }
+
+    val ratios: List<Double> = when (mode) {
+        "half" -> listOf(0.5)
+        "third" -> listOf(1.0 / 3, 2.0 / 3)
+        else -> custom.split(',', '，')
+            .mapNotNull { it.trim().toDoubleOrNull() }
+            .filter { it > 0.0 && it < 1.0 }
+    }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        shape = RoundedCornerShape(24.dp),
+        title = { Text(text = "A3 拆成 A4") },
+        text = {
+            Column {
+                Text(
+                    text = "由服务端做矢量裁剪，文字与图形保持清晰；拆分结果会替换当前待打印文件。",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+                listOf(
+                    "half" to "对半拆（左右各一页 A4）",
+                    "third" to "三等分",
+                    "custom" to "自定义裁切位置",
+                ).forEach { option ->
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { mode = option.first },
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        RadioButton(
+                            selected = mode == option.first,
+                            onClick = { mode = option.first },
+                        )
+                        Text(text = option.second, style = MaterialTheme.typography.bodyMedium)
+                    }
+                }
+                if (mode == "custom") {
+                    OutlinedTextField(
+                        value = custom,
+                        onValueChange = { custom = it },
+                        label = { Text("比例，如 0.5 或 0.33,0.66") },
+                        singleLine = true,
+                        shape = RoundedCornerShape(14.dp),
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(
+                onClick = { onConfirm(ratios) },
+                enabled = ratios.isNotEmpty(),
+            ) {
+                Text(text = "开始拆分")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text(text = "取消") }
+        },
+    )
 }
