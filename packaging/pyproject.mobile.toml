@@ -1,0 +1,43 @@
+# 网络打印 —— 移动端客户端（iOS）打包配置模板
+#
+# 由 tools/build_ios.sh 复制为构建目录下的 pyproject.toml 使用：
+#   · 入口模块为 flet_client（客户端），与桌面服务端 flet_app 完全独立；
+#   · 只声明客户端实际用到的依赖，避免把 Flask / PyMuPDF 等打进 iOS 包；
+#   · iOS 需要「本地网络」用途说明，否则访问 192.168.x.x 时系统会静默拒绝。
+
+[project]
+name = "jyprinter-client"
+version = "1.7.1"
+requires-python = ">=3.11,<3.14"
+dependencies = [
+    "flet==1.0.4",
+    "requests>=2.31",
+]
+
+[tool.flet]
+product = "网络打印"
+artifact = "jyprinter"
+org = "com.cgm"
+bundle_id = "com.cgm.jyprinter"
+company = "陈光明"
+copyright = "Copyright © 2026 陈光明"
+
+[tool.flet.app]
+module = "flet_client"
+exclude = [
+    "__pycache__",
+    "*.pyc",
+]
+
+[tool.flet.ios.info]
+# iOS 14+ 访问局域网会弹「本地网络」授权，必须提供用途说明
+NSLocalNetworkUsageDescription = "需要在局域网内连接打印服务，把文件发送到打印机。"
+# 打印服务通常以 http:// 暴露在局域网，允许明文 HTTP（仅用于内网）
+UISupportedInterfaceOrientations = [
+    "UIInterfaceOrientationPortrait",
+    "UIInterfaceOrientationLandscapeLeft",
+    "UIInterfaceOrientationLandscapeRight",
+]
+
+[tool.flet.ios.info.NSAppTransportSecurity]
+NSAllowsArbitraryLoads = true
