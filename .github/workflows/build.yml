@@ -2,7 +2,7 @@
 # jyprinter 云端编译打包（GitHub Actions）
 #
 # 触发方式：
-#   1. 手动：GitHub 仓库页面 → Actions → 左侧「双平台编译打包」→ Run workflow
+#   1. 手动：GitHub 仓库页面 → Actions → 左侧「三平台编译打包」→ Run workflow
 #   2. 发布：git tag v1.3.0 && git push origin v1.3.0
 #      → 编译完成后自动创建 Release 并附上全部安装包
 #
@@ -10,6 +10,7 @@
 #   · jyprinter-windows-x64-<版本>       Windows 7 SP1+ 单文件 jyprinter.exe
 #   · jyprinter-linux-x86_64-<版本>      麒麟/Linux x86 电脑：tar.gz + .deb + .rpm
 #   · jyprinter-linux-arm64-<版本>       麒麟/Linux ARM64 国产电脑（飞腾/鲲鹏）：tar.gz + .deb + .rpm
+#   · jyprinter-android-<版本>           Android 客户端 APK（debug 签名，可直接安装）
 #
 # 说明：macOS 版（Flet 桌面壳）未纳入流水线，需在 macOS 14+ 的机器上执行
 #       tools/build_macos.sh 本地构建（Flet 内置 Flutter 3.44.8 硬性要求 macOS 14+）。
@@ -19,10 +20,11 @@
 #     避免在高版本 glibc 上构建出的二进制在麒麟上无法运行；
 #   · ARM64 版使用 GitHub 原生 ARM64 运行器（ubuntu-24.04-arm）构建 —— PyInstaller
 #     不支持交叉编译，必须同架构构建；该运行器对公开仓库免费，私有仓库需付费计划；
-#   · Windows 任务用 Python 3.8 构建，保证产物可在 Windows 7 SP1 运行。
+#   · Windows 任务用 Python 3.8 构建，保证产物可在 Windows 7 SP1 运行；
+#   · Android 任务用 JDK 17 + Gradle 8.7 构建 debug APK（可直接安装，无需签名配置）。
 # =============================================================================
 
-name: 双平台编译打包
+name: 三平台编译打包
 
 on:
   workflow_dispatch:          # 允许在网页上手动触发
@@ -113,10 +115,56 @@ jobs:
             dist/*.deb
             dist/*.rpm
 
+  # ------------------------------------------------------------ Android APK
+  build-android:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # AGP 8.5 要求 JDK 17
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      # 安装 Android 命令行工具并接受 SDK 许可
+      - uses: android-actions/setup-android@v3
+
+      # 显式安装编译所需的平台与构建工具，避免依赖 AGP 自动下载
+      - name: 安装 Android SDK 平台与构建工具
+        run: sdkmanager "platforms;android-34" "build-tools;34.0.0"
+
+      # 直接指定 Gradle 版本，不走 wrapper 里的国内镜像地址
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.7'
+
+      - name: 读取版本号
+        id: ver
+        run: |
+          V=$(python3 -c "import sys; sys.path.insert(0, '.'); from core import settings; print(settings.VERSION)")
+          echo "VERSION=$V" >> "$GITHUB_OUTPUT"
+
+      - name: 构建 debug APK
+        working-directory: android
+        run: gradle assembleDebug --no-daemon --console=plain
+
+      - name: 重命名 APK
+        run: |
+          mkdir -p dist/android
+          cp android/app/build/outputs/apk/debug/app-debug.apk \
+             "dist/android/jyprinter-android-${{ steps.ver.outputs.VERSION }}.apk"
+
+      - name: 上传 Android 产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: jyprinter-android-${{ steps.ver.outputs.VERSION }}
+          path: dist/android/*.apk
+
   # ------------------------------------------------------------ 打标签时发布 Release
   release:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [build-windows, build-linux]
+    needs: [build-windows, build-linux, build-android]
     runs-on: ubuntu-latest
     steps:
       - name: 汇总全部平台产物
