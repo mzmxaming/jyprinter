@@ -54,6 +54,21 @@ if [ ! -f "${BIN}" ]; then
     die "未找到 ${BIN}，请先执行：bash tools/build_linux.sh"
 fi
 
+# 校验待打包程序的 ELF 架构：PyInstaller 不支持交叉编译，
+# 若把别的架构的二进制打进来，会得到「架构标签正确但根本跑不起来」的包
+elf_arch() {
+    local machine
+    machine="$(od -An -t u2 -j 18 -N 2 "$1" 2>/dev/null | tr -d ' \n')"
+    case "${machine}" in
+        62)  echo "x86_64" ;;
+        183) echo "aarch64" ;;
+        258) echo "loongarch64" ;;
+        *)   echo "unknown(${machine})" ;;
+    esac
+}
+BIN_ARCH="$(elf_arch "${BIN}")"
+[ "${BIN_ARCH}" = "${ARCH}" ] || die "dist/${PKG} 是 ${BIN_ARCH} 架构，与构建机 ${ARCH} 不一致；请在本机重新执行 bash tools/build_linux.sh --clean"
+
 [ -f "${UNIT_SRC}" ] || die "缺少 systemd 单元模板：${UNIT_SRC}"
 
 log "程序版本：${VERSION}　目标架构：${DEB_ARCH}"

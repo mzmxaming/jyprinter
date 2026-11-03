@@ -369,6 +369,16 @@ def set_autostart(enable: bool) -> Tuple[bool, str]:
 # --------------------------------------------------------------------------- 控制台 / 打开文件
 
 
+def has_console() -> bool:
+    """Linux 版没有独立控制台窗口。
+
+    参数：无
+    返回：
+        bool，恒为 False
+    """
+    return False
+
+
 def console_visible() -> bool:
     """Linux 版没有独立控制台窗口。
 

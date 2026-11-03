@@ -22,6 +22,7 @@
         {% if qr_available %}
         <button id="show-qrcode" class="ghost small" type="button">手机扫码</button>
         {% endif %}
+        <a class="ghost small accent" href="{{ url_for('a3_split_page') }}" title="把横向 A3 页面沿裁切线拆成两页 A4，导出后可直接上传打印">A3 拆分 A4</a>
         <span class="badge role">{{ user.username }} ｜ {{ '管理员' if is_admin else '普通用户' }}</span>
         <button id="change-password" class="ghost small" type="button">修改密码</button>
         {% if is_admin %}<button id="manage-users" class="ghost small" type="button">用户管理</button>{% endif %}
@@ -70,7 +71,11 @@
       <div class="params">
         <label class="field">
           <span>页面范围</span>
-          <input id="page-range" type="text" placeholder="全部，如 1-3,5 或 2-" value="{{ config.page_range }}">
+          <!-- 页码范围每次打开都从「全部」开始（不再读配置），留空即全部。
+               autocomplete/name 是防浏览器自动填充：本页没有 form，浏览器会挑第一个文本框
+               把保存的登录账号塞进来（现场出现过「上传后页面范围自动变成用户账号」） -->
+          <input id="page-range" type="text" name="page_range" autocomplete="off" spellcheck="false"
+                 placeholder="全部，如 1-3,5 或 2-" value="">
         </label>
         <label class="field">
           <span>缩放</span>
@@ -99,9 +104,21 @@
             <option value="high">高清（600 DPI）</option>
           </select>
         </label>
+        <label class="field">
+          <span>方向</span>
+          <select id="orientation" title="自动：跟随文档首页方向；方向与纸张不一致时内容会旋转 90° 铺满纸张">
+            <option value="auto">自动（跟随文档）</option>
+            <option value="portrait">纵向</option>
+            <option value="landscape">横向</option>
+          </select>
+        </label>
       </div>
 
       <div class="params">
+        <label class="check" title="表格类文件（xls / xlsx / et）转换前设为「一页宽、不限页高」，宽表不再被拆到多页；不影响文件里已设置的打印区域。仅 Windows 生效">
+          <input id="fit-table" type="checkbox"{% if config.fit_table %} checked{% endif %}>
+          <span>表格适应一页宽</span>
+        </label>
         <label class="check">
           <input id="require-confirmation" type="checkbox"{% if config.require_confirmation %} checked{% endif %}>
           <span>先预览确认再打印</span>
@@ -173,6 +190,41 @@
       </div>
     </section>
 
+    {% if is_admin %}
+    <section class="card">
+      <div class="card-head">
+        <h2>打印统计</h2>
+        <div class="seg" id="stat-seg">
+          <button type="button" class="seg-btn" data-window="today">今日</button>
+          <button type="button" class="seg-btn active" data-window="week">近 7 天</button>
+          <button type="button" class="seg-btn" data-window="month">近 30 天</button>
+          <button type="button" class="seg-btn" data-window="all">累计</button>
+        </div>
+      </div>
+
+      <div class="stat-grid">
+        <div class="stat-cell"><span class="stat-num" id="stat-tasks">0</span><span class="stat-label">任务数</span></div>
+        <div class="stat-cell"><span class="stat-num" id="stat-copies">0</span><span class="stat-label">份数</span></div>
+        <div class="stat-cell"><span class="stat-num" id="stat-pages">0</span><span class="stat-label">页数</span></div>
+        <div class="stat-cell"><span class="stat-num" id="stat-sheets">0</span><span class="stat-label">估算用纸（张）</span></div>
+      </div>
+
+      <div class="stat-cols">
+        <div class="stat-col">
+          <span class="label">按纸张</span>
+          <div class="stat-list" id="stat-papers"><p class="note">暂无数据</p></div>
+        </div>
+        <div class="stat-col">
+          <span class="label">按单双面</span>
+          <div class="stat-list" id="stat-duplex"><p class="note">暂无数据</p></div>
+        </div>
+      </div>
+
+      <p class="note" id="stat-note">只统计已完成的任务；用纸张数按单面 1 页/张、双面 2 页/张估算</p>
+    </section>
+    {% endif %}
+
+    {% if is_admin %}
     <section class="card">
       <div class="card-head">
         <h2>打印日志</h2>
@@ -197,6 +249,7 @@
         </table>
       </div>
     </section>
+    {% endif %}
   </main>
 
   <footer class="page-footer">
@@ -248,7 +301,7 @@
         </table>
       </div>
       <div class="user-create">
-        <label class="field"><span>新账号</span><input id="new-username" type="text" placeholder="3-32 位字母/数字/_-"></label>
+        <label class="field"><span>新账号</span><input id="new-username" type="text" autocomplete="off" placeholder="3-32 位字母/数字/_-"></label>
         <label class="field"><span>初始密码</span><input id="new-user-password" type="password" placeholder="至少 6 位"></label>
         <label class="field"><span>角色</span>
           <select id="new-user-role">
@@ -282,12 +335,14 @@
     window.JY_DEFAULT_PAPER = {{ config.paper | tojson }};
     window.JY_DEFAULT_DUPLEX = {{ config.duplex | tojson }};
     window.JY_DEFAULT_PRINTER = {{ config.printer | tojson }};
-    window.JY_DEFAULT_PAGE_RANGE = {{ config.page_range | tojson }};
     window.JY_DEFAULT_SCALE = {{ config.scale | tojson }};
     window.JY_DEFAULT_SCALE_PERCENT = {{ config.scale_percent | tojson }};
     window.JY_DEFAULT_COLOR = {{ config.color | tojson }};
     window.JY_DEFAULT_QUALITY = {{ config.quality | tojson }};
+    window.JY_DEFAULT_ORIENTATION = {{ config.orientation | tojson }};
+    window.JY_DEFAULT_FIT_TABLE = {{ config.fit_table | tojson }};
     window.JY_REQUIRE_CONFIRMATION = {{ config.require_confirmation | tojson }};
+    window.JY_KEEP_PRINTED_FILE = {{ config.keep_file_after_print | tojson }};
     window.JY_IS_ADMIN = {{ is_admin | tojson }};
     window.JY_USERNAME = {{ user.username | tojson }};
     window.JY_QR_AVAILABLE = {{ qr_available | tojson }};

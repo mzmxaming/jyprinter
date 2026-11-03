@@ -11,6 +11,8 @@
     paperSignature: "",
     taskSignature: "",
     logSignature: "",
+    statWindow: "week",
+    statData: null,
     submitting: false
   };
 
@@ -281,6 +283,8 @@
     form.append("scale_percent", $("scale-percent").value || "100");
     form.append("color", $("color").value);
     form.append("quality", $("quality").value);
+    form.append("orientation", $("orientation").value);
+    form.append("fit_table", $("fit-table").checked ? "1" : "0");
     form.append("require_confirmation", $("require-confirmation").checked ? "1" : "0");
 
     state.submitting = true;
@@ -379,14 +383,24 @@
 
         var actionCell = document.createElement("td");
 
-        var previewButton = document.createElement("button");
-        previewButton.type = "button";
-        previewButton.className = "link";
-        previewButton.textContent = "预览";
-        previewButton.addEventListener("click", function () {
-          openPreview(task);
-        });
-        actionCell.appendChild(previewButton);
+        // 预览依赖服务器上的源文件：取消一定会删除；打印成功默认也删除，
+        // 只有配置 keep_file_after_print=true 时才保留（此时已完成任务也能预览与重打）
+        var hasSourceFile =
+          task.status === "review" ||
+          task.status === "queued" ||
+          task.status === "printing" ||
+          task.status === "failed" ||
+          (task.status === "done" && window.JY_KEEP_PRINTED_FILE);
+        if (hasSourceFile) {
+          var previewButton = document.createElement("button");
+          previewButton.type = "button";
+          previewButton.className = "link";
+          previewButton.textContent = "预览";
+          previewButton.addEventListener("click", function () {
+            openPreview(task);
+          });
+          actionCell.appendChild(previewButton);
+        }
 
         if (task.status === "review") {
           var confirmButton = document.createElement("button");
@@ -399,24 +413,62 @@
           actionCell.appendChild(confirmButton);
         }
 
-        if (task.status === "queued" || task.status === "review") {
-          var cancel = document.createElement("button");
-          cancel.type = "button";
-          cancel.className = "link";
-          cancel.textContent = "取消";
-          cancel.addEventListener("click", function () {
-            act("/api/tasks/" + task.id + "/cancel", "已取消任务");
-          });
-          actionCell.appendChild(cancel);
-        } else if (task.status === "failed" || task.status === "canceled") {
+        if (
+          task.status === "queued" ||
+          task.status === "review" ||
+          task.status === "printing"
+        ) {
+          if (task.cancel_requested) {
+            // 已请求取消：等 Worker 在下一页检查点中止并收尾
+            var stopping = document.createElement("span");
+            stopping.className = "note";
+            stopping.textContent = "取消中…";
+            actionCell.appendChild(stopping);
+          } else {
+            var cancel = document.createElement("button");
+            cancel.type = "button";
+            cancel.className = "link";
+            cancel.textContent = "取消";
+            cancel.addEventListener("click", function () {
+              // 打印中的取消要二次确认：只能撤回尚未出纸的部分，且原文件会被删除
+              if (
+                task.status === "printing" &&
+                !window.confirm(
+                  "该任务正在打印。\n\n取消后只会撤回尚未出纸的部分，已经打出的页面无法收回；\n原文件与预览也会被删除，需要时请重新上传。\n\n确定取消吗？"
+                )
+              ) {
+                return;
+              }
+              act(
+                "/api/tasks/" + task.id + "/cancel",
+                "已取消任务",
+                task.status === "printing"
+              );
+            });
+            actionCell.appendChild(cancel);
+          }
+        } else if (
+          task.status === "failed" ||
+          (task.status === "done" && window.JY_KEEP_PRINTED_FILE)
+        ) {
+          // 失败任务可重试；已完成任务仅当配置保留源文件时才提供「重打」
           var retry = document.createElement("button");
           retry.type = "button";
           retry.className = "link";
-          retry.textContent = "重试";
+          retry.textContent = task.status === "done" ? "重打" : "重试";
           retry.addEventListener("click", function () {
-            act("/api/tasks/" + task.id + "/retry", "已重新排队");
+            act(
+              "/api/tasks/" + task.id + "/retry",
+              task.status === "done" ? "已重新排队打印" : "已重新排队"
+            );
           });
           actionCell.appendChild(retry);
+        } else {
+          // 已完成 / 已取消：源文件已删除，没有可执行的操作，给出说明避免出现空单元格
+          var removed = document.createElement("span");
+          removed.className = "note";
+          removed.textContent = "文件已删除";
+          actionCell.appendChild(removed);
         }
 
         if (task.message && (task.status === "failed" || task.status === "printing")) {
@@ -430,10 +482,11 @@
     });
   }
 
-  function act(url, successText) {
+  function act(url, successText, useServerMessage) {
     request(url, { method: "POST" }).then(function (data) {
       if (data.ok) {
-        toast(successText);
+        // 「打印中取消」的说明由后端给出（含「已出纸无法收回」等提示）
+        toast(useServerMessage && data.message ? data.message : successText);
       } else {
         toast(data.message || data.error || "操作失败", true);
       }
@@ -444,6 +497,10 @@
   }
 
   function refreshLogs() {
+    // 打印日志仅管理员可见（普通用户页面里没有日志面板，也不去请求接口）
+    if (!window.JY_IS_ADMIN || !$("log-body")) {
+      return Promise.resolve();
+    }
     return request("/api/logs?limit=50").then(function (data) {
       var logs = data.logs || [];
       var signature = logs
@@ -479,10 +536,12 @@
           log.copies ? log.copies + " 份" : "",
           log.duplex,
           log.paper,
+          log.orientation,
           log.pages_range,
           log.scale,
           log.color,
-          log.quality
+          log.quality,
+          log.fit_table
         ])));
         row.appendChild(cell(log.printer));
         row.appendChild(cell(log.status));
@@ -491,6 +550,136 @@
       });
     }).catch(function () {
       /* 轮询失败保持静默 */
+    });
+  }
+
+  /* ------------------------------------------------------------ 打印统计（仅管理员） */
+
+  function refreshStats() {
+    // 打印统计仅管理员可见（普通用户页面里没有该卡片，也不去请求接口）
+    if (!window.JY_IS_ADMIN || !$("stat-seg")) {
+      return Promise.resolve();
+    }
+    return request("/api/stats").then(function (data) {
+      if (!data.ok) {
+        return;
+      }
+      state.statData = data;
+      renderStats();
+    }).catch(function () {
+      /* 轮询失败保持静默 */
+    });
+  }
+
+  function renderStats() {
+    var data = state.statData;
+    if (!data || !data.windows) {
+      return;
+    }
+    var bucket = data.windows[state.statWindow] || data.windows.week;
+    if (!bucket) {
+      return;
+    }
+    setStatText("stat-tasks", bucket.tasks);
+    setStatText("stat-copies", bucket.copies);
+    setStatText("stat-pages", bucket.pages);
+    setStatText("stat-sheets", bucket.sheets);
+    renderStatTable("stat-papers", bucket.papers);
+    renderStatTable("stat-duplex", bucket.duplex);
+
+    var note = $("stat-note");
+    if (note) {
+      var scope = bucket.days
+        ? "统计范围：最近 " + bucket.days + " 天"
+        : (data.first_date ? "统计范围：" + data.first_date + " 起累计" : "统计范围：全部累计");
+      note.textContent = scope + "；只统计已完成的任务；用纸张数按单面 1 页/张、双面 2 页/张估算";
+    }
+  }
+
+  function setStatText(id, value) {
+    var node = $(id);
+    if (node) {
+      node.textContent = String(Number(value) || 0);
+    }
+  }
+
+  function renderStatTable(id, table) {
+    var box = $(id);
+    if (!box) {
+      return;
+    }
+    box.innerHTML = "";
+    var names = Object.keys(table || {});
+    if (!names.length) {
+      var empty = document.createElement("p");
+      empty.className = "note";
+      empty.textContent = "暂无数据";
+      box.appendChild(empty);
+      return;
+    }
+
+    // 按份数从多到少排序，条目名的长度决定排序稳定性（同份数时按名称）
+    names.sort(function (left, right) {
+      var diff = (table[right].copies || 0) - (table[left].copies || 0);
+      return diff !== 0 ? diff : (left < right ? -1 : 1);
+    });
+    var maximum = 0;
+    names.forEach(function (name) {
+      maximum = Math.max(maximum, table[name].copies || 0);
+    });
+
+    names.forEach(function (name) {
+      var item = table[name] || {};
+      var row = document.createElement("div");
+      row.className = "stat-row";
+
+      var label = document.createElement("span");
+      label.className = "stat-name";
+      label.textContent = name;
+
+      var bar = document.createElement("span");
+      bar.className = "stat-bar";
+      var fill = document.createElement("i");
+      var ratio = maximum ? Math.round(((item.copies || 0) / maximum) * 100) : 0;
+      // 最细也留 2%，避免有数据却看不出条形
+      fill.style.width = Math.max(ratio, 2) + "%";
+      bar.appendChild(fill);
+
+      var value = document.createElement("span");
+      value.className = "stat-val";
+      value.textContent =
+        (item.copies || 0) + " 份 · " + (item.pages || 0) + " 页 · " + (item.sheets || 0) + " 张";
+
+      row.appendChild(label);
+      row.appendChild(bar);
+      row.appendChild(value);
+      box.appendChild(row);
+    });
+  }
+
+  function bindStats() {
+    var box = $("stat-seg");
+    if (!box) {
+      return;
+    }
+    box.addEventListener("click", function (event) {
+      var button = event.target;
+      while (button && button !== box && !button.getAttribute("data-window")) {
+        button = button.parentNode;
+      }
+      if (!button || button === box) {
+        return;
+      }
+      var name = button.getAttribute("data-window") || "week";
+      if (name === state.statWindow) {
+        return;
+      }
+      state.statWindow = name;
+      var buttons = box.querySelectorAll(".seg-btn");
+      for (var i = 0; i < buttons.length; i += 1) {
+        buttons[i].classList.toggle("active", buttons[i] === button);
+      }
+      renderStats();  // 数据已缓存在前端，切换窗口无需重新请求
     });
   }
 
@@ -526,8 +715,16 @@
       }
 
       var pages = data.pages || [];
-      var meta = "共 " + data.page_count + " 页";
-      if (data.rendered < data.page_count) {
+      var selected = data.page_count || pages.length;
+      var docPages = data.document_pages || selected;
+      // 预览与打印一致：只列出会被打印的页；缩略图标注的是它在原文档中的真实页码
+      var meta = "";
+      if (data.pages_range) {
+        meta = "页码范围 " + data.pages_range + " ｜ 将打印 " + selected + " 页（文档共 " + docPages + " 页）";
+      } else {
+        meta = "共 " + selected + " 页";
+      }
+      if (data.rendered < selected) {
         meta += "（仅展示前 " + data.rendered + " 页缩略图）";
       }
       meta += " ｜ " + (task.params_text || "") + (task.printer ? " / " + task.printer : "");
@@ -607,6 +804,7 @@
     state.logSignature = "";
     refreshTasks();
     refreshLogs();
+    refreshStats();
   }
 
   function submitPassword() {
@@ -735,6 +933,7 @@
     var input = $("file-input");
 
     $("scale").addEventListener("change", syncScalePercent);
+    bindStats();
 
     dropzone.addEventListener("click", function () {
       input.click();
@@ -800,14 +999,47 @@
     });
   }
 
+  /** 清掉浏览器自动填充塞进「页面范围」的内容。
+   *
+   *  本页没有 <form>，浏览器（Chrome/Edge）会按启发式挑第一个文本框填入保存的登录账号，
+   *  现场表现为「上传文档后页面范围自动变成用户账号」。除了在标签上写 autocomplete="off"，
+   *  这里再做一层兜底：只要值等于当前账号（或密码框的内容）就清空。
+   *  自动填充可能发生在 load 之后，故在加载完成后的一小段时间内多检查几次。
+   */
+  function clearAutofilledPageRange() {
+    var field = $("page-range");
+    if (!field) {
+      return;
+    }
+    var text = (field.value || "").trim();
+    if (!text) {
+      return;
+    }
+    var account = window.JY_USERNAME ? String(window.JY_USERNAME) : "";
+    var oldPassword = $("old-password") ? ($("old-password").value || "").trim() : "";
+    if ((account && text === account) || (oldPassword && text === oldPassword)) {
+      field.value = "";
+    }
+  }
+
   document.addEventListener("DOMContentLoaded", function () {
     bindEvents();
     $("duplex").value = window.JY_DEFAULT_DUPLEX === "vertical" ? "vertical" : "simplex";
-    $("page-range").value = window.JY_DEFAULT_PAGE_RANGE || "";
+    // 页码范围不读配置：每次打开都默认「全部」（留空即全部），避免上次填过的值一直被带出来
+    $("page-range").value = "";
+    clearAutofilledPageRange();
+    // 自动填充的写入时机不固定（load 之后、聚焦时都可能），因此多补几次检查
+    [150, 500, 1200, 2500].forEach(function (delay) {
+      window.setTimeout(clearAutofilledPageRange, delay);
+    });
+    window.addEventListener("load", clearAutofilledPageRange);
+    $("page-range").addEventListener("focus", clearAutofilledPageRange);
     $("scale").value = window.JY_DEFAULT_SCALE || "fit";
     $("scale-percent").value = window.JY_DEFAULT_SCALE_PERCENT || 100;
     $("color").value = window.JY_DEFAULT_COLOR || "color";
     $("quality").value = window.JY_DEFAULT_QUALITY || "normal";
+    $("orientation").value = window.JY_DEFAULT_ORIENTATION || "auto";
+    $("fit-table").checked = window.JY_DEFAULT_FIT_TABLE !== false;
     syncScalePercent();
     $("require-confirmation").checked = !!window.JY_REQUIRE_CONFIRMATION;
 
@@ -823,8 +1055,12 @@
     loadPrinters();
     refreshTasks();
     refreshLogs();
+    refreshStats();
     window.setInterval(refreshTasks, TASK_INTERVAL);
-    window.setInterval(refreshLogs, LOG_INTERVAL);
+    if (window.JY_IS_ADMIN) {
+      window.setInterval(refreshLogs, LOG_INTERVAL);
+      window.setInterval(refreshStats, LOG_INTERVAL);
+    }
 
     request("/api/me").then(function (data) {
       if (data.ok && data.default_password) {

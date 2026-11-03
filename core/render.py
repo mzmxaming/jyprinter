@@ -30,6 +30,35 @@ QUALITY_DPI = {"draft": 150, "normal": 300, "high": 600}
 # 单页位图像素上限：超大页面 + 高分辨率时自动收敛渲染倍率，避免内存耗尽
 MAX_PAGE_PIXELS = 80_000_000
 
+# 出纸方向
+ORIENTATION_AUTO = "auto"          # 跟随文档首页方向
+ORIENTATION_PORTRAIT = "portrait"  # 纵向
+ORIENTATION_LANDSCAPE = "landscape"  # 横向
+
+# 源页面方向与纸张方向不一致时的旋转方式：逆时针 90°（页面顶部朝纸张左缘），
+# 阅读时把纸顺时针转一下即可
+ROTATE_TO_FIT = Image.ROTATE_90
+
+
+class PrintCanceled(RuntimeError):
+    """打印任务被用户取消（协作式中止）。
+
+    打印引擎在逐页绘制过程中检测到取消标记时抛出；调用方据此把任务记为「已取消」
+    而不是「失败」。属于 RuntimeError 子类，因此撰写过程中已有的回滚逻辑
+    （AbortDoc 等）依然会执行。
+    """
+
+    def __init__(self, message: str = "用户已取消打印") -> None:
+        """构造取消异常。
+
+        参数：
+            message - 面向用户的说明文本
+        返回：
+            None
+        """
+        super().__init__(message)
+        self.message = message
+
 # A4 纸张物理尺寸（英寸）与文本排版参数
 A4_WIDTH_IN = 8.27
 A4_HEIGHT_IN = 11.69
@@ -205,6 +234,10 @@ def iter_pdf_pages(path: Path, dpi: int = RENDER_DPI) -> Iterator[Image.Image]:
 def iter_image_pages(path: Path) -> Iterator[Image.Image]:
     """读取图片文件并逐帧产出位图页（GIF / TIFF 多页自动展开）。
 
+    超大图片（超过 MAX_PAGE_PIXELS）会按上限等比缩小后再输出：图片本身没有固定物理尺寸、
+    打印时也会按纸张缩放，缩小不会影响观感，却可以避免位图过大导致 GDI / 内存失败
+    （Windows 打印链路上表现为 StretchBlt failed）。
+
     参数：
         path - 图片文件路径
     返回：
@@ -217,7 +250,18 @@ def iter_image_pages(path: Path) -> Iterator[Image.Image]:
             frames = int(getattr(handle, "n_frames", 1))
             for index in range(max(1, frames)):
                 handle.seek(index)
-                yield handle.convert("RGB")
+                image = handle.convert("RGB")
+                pixels = image.size[0] * image.size[1]
+                if pixels > MAX_PAGE_PIXELS:
+                    ratio = math.sqrt(MAX_PAGE_PIXELS / float(pixels))
+                    target = (
+                        max(1, int(image.size[0] * ratio)),
+                        max(1, int(image.size[1] * ratio)),
+                    )
+                    shrunk = image.resize(target, Image.LANCZOS)
+                    image.close()
+                    image = shrunk
+                yield image
     except (OSError, ValueError) as exc:
         raise RuntimeError(f"图片无法解析：{exc}") from exc
 
@@ -316,6 +360,8 @@ class RenderOptions:
         scale         - 缩放方式：fit 适应页面 / actual 实际大小 / custom 自定义百分比
         scale_percent - scale=custom 时的百分比（10~400）
         color         - 颜色模式：color 彩色 / mono 黑白（灰度）
+        orientation   - 出纸方向：auto 跟随文档首页 / portrait 纵向 / landscape 横向
+        fit_table     - 表格类文件转换前是否设置「适应一页宽」（仅 Windows 生效）
     """
 
     dpi: int = RENDER_DPI
@@ -323,6 +369,22 @@ class RenderOptions:
     scale: str = "fit"
     scale_percent: int = 100
     color: str = "color"
+    orientation: str = ORIENTATION_AUTO
+    fit_table: bool = True
+
+    def wants_landscape(self) -> Optional[bool]:
+        """返回显式要求的横向与否。
+
+        参数：无
+        返回：
+            True 横向 / False 纵向 / None 表示自动（跟随文档）
+        """
+        name = str(self.orientation or ORIENTATION_AUTO).lower()
+        if name == ORIENTATION_LANDSCAPE:
+            return True
+        if name == ORIENTATION_PORTRAIT:
+            return False
+        return None
 
     def scale_ratio(self) -> Optional[float]:
         """返回相对「自然尺寸」的缩放比例。
@@ -347,6 +409,75 @@ class RenderOptions:
             bool，黑白返回 True
         """
         return str(self.color or "").lower() == "mono"
+
+
+def resolve_orientation(source: Any, ext: str, options: RenderOptions) -> str:
+    """确定本次出纸方向（纸张方向）。
+
+    显式指定时直接采用；auto 时取源文档首页方向：PDF 读首页页面框（已含 /Rotate 旋转），
+    图片按宽高比判定，其余（文本等）按纵向。
+
+    参数：
+        source  - 源文件路径；Office 文件请传已转换的 PDF 并配 "pdf" 扩展名
+        ext     - 文件扩展名
+        options - 渲染选项
+    返回：
+        str，"portrait" 或 "landscape"
+    """
+    forced = options.wants_landscape()
+    if forced is not None:
+        return ORIENTATION_LANDSCAPE if forced else ORIENTATION_PORTRAIT
+
+    normalized = formats.normalize_ext(ext)
+    try:
+        if normalized in formats.PDF_EXTS:
+            pymupdf = import_pymupdf()
+            with pymupdf.open(str(source)) as document:
+                if document.page_count:
+                    rect = document[0].rect
+                    return (
+                        ORIENTATION_LANDSCAPE
+                        if rect.width > rect.height
+                        else ORIENTATION_PORTRAIT
+                    )
+        elif normalized in formats.IMAGE_EXTS:
+            with Image.open(str(source)) as handle:
+                width, height = handle.size
+            return ORIENTATION_LANDSCAPE if width > height else ORIENTATION_PORTRAIT
+    except Exception:
+        # 判定失败时按纵向处理，不影响后续打印
+        pass
+    return ORIENTATION_PORTRAIT
+
+
+def oriented_size(width: float, height: float, orientation: str) -> Tuple[float, float]:
+    """按出纸方向换算页面尺寸（横向时交换宽高）。
+
+    参数：
+        width/height - 纵向纸张尺寸（点或像素）
+        orientation  - portrait 纵向 / landscape 横向
+    返回：
+        (宽, 高)，横向返回 (长边, 短边)
+    """
+    long_side = max(float(width), float(height))
+    short_side = min(float(width), float(height))
+    if str(orientation or "").lower() == ORIENTATION_LANDSCAPE:
+        return long_side, short_side
+    return short_side, long_side
+
+
+def should_rotate(width: int, height: int, sheet_landscape: bool) -> bool:
+    """判断位图是否需要旋转 90° 才能铺满当前纸张。
+
+    参数：
+        width/height   - 位图尺寸（像素）
+        sheet_landscape- 纸张是否横向
+    返回：
+        bool，位图方向与纸张方向不一致时返回 True
+    """
+    if width <= 0 or height <= 0 or width == height:
+        return False
+    return (width > height) != bool(sheet_landscape)
 
 
 def parse_page_range(text: str) -> Optional[List[Tuple[int, Optional[int]]]]:
@@ -444,6 +575,61 @@ def apply_options(pages: Iterator[Image.Image], options: RenderOptions) -> Itera
         raise RuntimeError(f"所选页码范围没有对应页面（该文档共 {index} 页），请重新设置页面范围")
 
 
+def visible_blit_box(
+    width: int,
+    height: int,
+    left: float,
+    top: float,
+    draw_w: float,
+    draw_h: float,
+    area_w: int,
+    area_h: int,
+) -> Optional[Tuple[Tuple[int, int, int, int], int, int, int, int]]:
+    """计算位图在目标区域内的可见范围，并把源位图裁剪到该范围。
+
+    位图的目标矩形可能超出目标区域（「实际大小」或自定义放大时）。此时若直接把超大矩形
+    交给 GDI，会因逻辑坐标只有 16 位、或驱动无法处理而报 `StretchBlt failed`。这里先把
+    源位图按可见部分裁剪，再按裁剪结果给出新的目标矩形 —— 裁剪后目标矩形必定落在目标
+    区域内，等同于「按区域裁切」的视觉效果。
+
+    参数：
+        width/height  - 源位图尺寸（像素）
+        left/top      - 位图目标矩形左上角（目标坐标，可能为负）
+        draw_w/draw_h - 位图目标矩形尺寸
+        area_w/area_h - 目标区域尺寸（如打印机可打印区，像素）
+    返回：
+        None 表示完全不可见；否则返回 (裁剪框, 目标 x, 目标 y, 目标宽, 目标高)，
+        其中裁剪框为源位图的整数像素范围 (x0, y0, x1, y1)
+    """
+    if width <= 0 or height <= 0 or draw_w <= 0 or draw_h <= 0 or area_w <= 0 or area_h <= 0:
+        return None
+
+    x0 = max(0.0, left)
+    y0 = max(0.0, top)
+    x1 = min(float(area_w), left + draw_w)
+    y1 = min(float(area_h), top + draw_h)
+    if x1 - x0 < 1.0 or y1 - y0 < 1.0:
+        return None
+
+    scale_x = draw_w / float(width)
+    scale_y = draw_h / float(height)
+
+    crop = (
+        max(0, int((x0 - left) / scale_x)),
+        max(0, int((y0 - top) / scale_y)),
+        min(width, int(round((x1 - left) / scale_x))),
+        min(height, int(round((y1 - top) / scale_y))),
+    )
+    if crop[2] <= crop[0] or crop[3] <= crop[1]:
+        return None
+
+    offset_x = max(0, min(int(round(x0)), area_w - 1))
+    offset_y = max(0, min(int(round(y0)), area_h - 1))
+    target_w = max(1, min(int(round((crop[2] - crop[0]) * scale_x)), area_w - offset_x))
+    target_h = max(1, min(int(round((crop[3] - crop[1]) * scale_y)), area_h - offset_y))
+    return crop, offset_x, offset_y, target_w, target_h
+
+
 def build_page_factory(
     path: str,
     ext: str,
@@ -475,7 +661,7 @@ def build_page_factory(
     converted: Optional[Path] = None
 
     if normalized in formats.OFFICE_EXTS:
-        converted = office_converter(source, normalized)
+        converted = office_converter(source, normalized, opts)
         base: Callable[[], Iterator[Image.Image]] = lambda: iter_pdf_pages(converted, opts.dpi)
     elif normalized in formats.PDF_EXTS:
         base = lambda: iter_pdf_pages(source, opts.dpi)

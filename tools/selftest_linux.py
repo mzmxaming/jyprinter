@@ -29,8 +29,10 @@ from PIL import Image  # noqa: E402
 
 from core import printers_linux as pl  # noqa: E402
 from core import render  # noqa: E402
+from core import split  # noqa: E402
+from core import stats  # noqa: E402
 from core import system_linux as sl  # noqa: E402
-from core.formats import normalize_ext, is_supported, is_office_ext  # noqa: E402
+from core.formats import normalize_ext, is_supported, is_office_ext, is_spreadsheet_ext  # noqa: E402
 
 PASS = 0
 FAIL = 0
@@ -303,6 +305,78 @@ def run_offline() -> None:
     check_true("color 判定为彩色", not render.RenderOptions(color="color").is_mono())
     check("质量预设分辨率", render.QUALITY_DPI, {"draft": 150, "normal": 300, "high": 600})
 
+    print("== 离线样例测试：出纸方向与旋转 ==")
+    check("横向：宽高互换", render.oriented_size(595.28, 841.89, "landscape"), (841.89, 595.28))
+    check("纵向：保持原样", render.oriented_size(595.28, 841.89, "portrait"), (595.28, 841.89))
+    check("纵向：传入倒置尺寸也能纠正", render.oriented_size(841.89, 595.28, "portrait"), (595.28, 841.89))
+    check("未知取值按纵向处理", render.oriented_size(595.28, 841.89, ""), (595.28, 841.89))
+    check_true("纵向位图 + 纵向纸张：不旋转", not render.should_rotate(2481, 3508, False))
+    check_true("纵向位图 + 横向纸张：旋转", render.should_rotate(2481, 3508, True))
+    check_true("横向位图 + 横向纸张：不旋转", not render.should_rotate(3508, 2481, True))
+    check_true("横向位图 + 纵向纸张：旋转", render.should_rotate(3508, 2481, False))
+    check_true("正方形位图：不旋转", not render.should_rotate(1000, 1000, True))
+    check_true("尺寸为 0：不旋转", not render.should_rotate(0, 0, True))
+    check("方向参数-横向", pl.orientation_args("landscape"), ["-o", "orientation-requested=4"])
+    check("方向参数-纵向不传参", pl.orientation_args("portrait"), [])
+    check("方向参数-auto 不传参", pl.orientation_args("auto"), [])
+    check("方向参数-大写与空格容错", pl.orientation_args(" Landscape "), ["-o", "orientation-requested=4"])
+    check(
+        "选项默认方向为自动且表格适配开启",
+        (render.RenderOptions().orientation, render.RenderOptions().fit_table),
+        ("auto", True),
+    )
+    check_true("横向选项判定", render.RenderOptions(orientation="landscape").wants_landscape() is True)
+    check_true("纵向选项判定", render.RenderOptions(orientation="portrait").wants_landscape() is False)
+    check_true("自动选项判定", render.RenderOptions(orientation="auto").wants_landscape() is None)
+    check_true("表格类扩展名判定", is_spreadsheet_ext("xlsx") and is_spreadsheet_ext("et"))
+    check_true("非表格不判定为表格", not is_spreadsheet_ext("docx"))
+
+    print("== 离线样例测试：打印中取消（CUPS cancel） ==")
+    check("取消参数-常规作业号", pl.cancel_args("Brother-42"), ["cancel", "Brother-42"])
+    check("取消参数-纯数字作业号", pl.cancel_args("42"), ["cancel", "42"])
+    check("取消参数-空作业号不生成参数", pl.cancel_args(""), [])
+    check_true("取消接口存在且可调用", callable(pl.cancel_job))
+    check_true("取消异常继承 RuntimeError", issubclass(render.PrintCanceled, RuntimeError))
+    check("取消异常默认说明", str(render.PrintCanceled()), "用户已取消打印")
+    check("取消异常自定义说明", str(render.PrintCanceled("已中止")), "已中止")
+
+    print("== 离线样例测试：打印落位裁剪（GDI 超大目标矩形防护） ==")
+    # 适应页面：位图完整可见，居中
+    box = render.visible_blit_box(1000, 1000, 0, 900, 4800, 4800, 4800, 6600)
+    check("适应页面-裁剪框", box[0], (0, 0, 1000, 1000))
+    check("适应页面-目标位置", (box[1], box[2]), (0, 900))
+    check("适应页面-目标尺寸", (box[3], box[4]), (4800, 4800))
+    # 放大到超出可打印区：必须被裁剪，目标矩形不得越界
+    box = render.visible_blit_box(1000, 1000, -1600, -700, 8000, 8000, 4800, 6600)
+    check("超出区域-裁剪框", box[0], (200, 87, 800, 912))
+    check("超出区域-目标位置", (box[1], box[2]), (0, 0))
+    check("超出区域-目标尺寸收敛到可打印区", (box[3], box[4]), (4800, 6600))
+    # 部分超出：只裁掉超出的一侧
+    box = render.visible_blit_box(1000, 1000, -100, 0, 1000, 1000, 4800, 6600)
+    check("部分超出-裁剪框", box[0], (100, 0, 1000, 1000))
+    check("部分超出-目标尺寸", (box[3], box[4]), (900, 1000))
+    # 完全落在区域外 / 退化尺寸：返回 None（跳过该页绘制）
+    check("完全在区域右侧", render.visible_blit_box(1000, 1000, 5000, 0, 1000, 1000, 4800, 6600), None)
+    check("完全在区域下方", render.visible_blit_box(1000, 1000, 0, 7000, 1000, 1000, 4800, 6600), None)
+    check("位图尺寸为 0", render.visible_blit_box(0, 0, 0, 0, 100, 100, 4800, 6600), None)
+    check("目标尺寸为 0", render.visible_blit_box(100, 100, 0, 0, 0, 0, 4800, 6600), None)
+    # 任意缩放下目标矩形都必须落在可打印区内（GDI 逻辑坐标只有 16 位，越界会报 StretchBlt failed）
+    overflow = []
+    for percent in (10, 50, 100, 200, 400, 1000):
+        for area in ((2481, 3508), (4760, 6814), (14043, 19866)):
+            scale = percent / 100.0
+            draw_w = 1000 * scale
+            draw_h = 1000 * scale
+            item = render.visible_blit_box(
+                1000, 1000, (area[0] - draw_w) / 2, (area[1] - draw_h) / 2,
+                draw_w, draw_h, area[0], area[1],
+            )
+            if item is None:
+                continue
+            if item[1] + item[3] > area[0] or item[2] + item[4] > area[1]:
+                overflow.append((percent, area, item))
+    check("各缩放档位目标矩形均不越界", overflow, [])
+
     print("== 离线样例测试：页面过滤与黑白转换 ==")
     source = [
         Image.new("RGB", (8, 8), (10, 20, 30)),
@@ -330,6 +404,73 @@ def run_offline() -> None:
         check_true("页码范围超出文档页数应报错", False)
     except RuntimeError as exc:
         check_true("页码范围超出文档页数已报错：%s" % exc, True)
+
+    print("== 离线样例测试：打印量统计（口径与聚合） ==")
+    check("单面：3 页 1 份 = 3 张", stats.sheets_for(3, 1, "simplex"), 3)
+    check("双面：3 页 1 份 = 2 张（向上取整）", stats.sheets_for(3, 1, "vertical"), 2)
+    check("双面：4 页 2 份 = 4 张", stats.sheets_for(4, 2, "vertical"), 4)
+    check("单面：4 页 2 份 = 8 张", stats.sheets_for(4, 2, "simplex"), 8)
+    check("双面：1 页 1 份 = 1 张（不足两张按 1 张）", stats.sheets_for(1, 1, "vertical"), 1)
+    check_true(
+        "单双面识别同时接受内部值与日志中文值",
+        stats.is_duplex("vertical") and stats.is_duplex("双面") and not stats.is_duplex("simplex"),
+    )
+
+    # 用「今天 / 昨天」构造样例，避免把用例写死成某个日期（换天执行也不会失败）
+    import datetime as _datetime
+
+    _now = _datetime.datetime.now()
+    _today = _now.strftime("%Y-%m-%d")
+    _yesterday = (_now - _datetime.timedelta(days=1)).strftime("%Y-%m-%d")
+    rows = [
+        {"time": _today + " 09:00:00", "status": "已完成", "copies": "2", "paper": "A4", "duplex": "双面", "pages": "3"},
+        {"time": _today + " 09:10:00", "status": "已完成", "copies": "1", "paper": "A4", "duplex": "单面", "pages": "4"},
+        {"time": _today + " 09:20:00", "status": "已完成", "copies": "1", "paper": "A3", "duplex": "单面", "pages": "1"},
+        {"time": _today + " 09:30:00", "status": "失败", "copies": "5", "paper": "A4", "duplex": "单面", "pages": "9"},
+        {"time": _today + " 09:40:00", "status": "已取消", "copies": "3", "paper": "A4", "duplex": "单面", "pages": "7"},
+        {"time": _yesterday + " 10:00:00", "status": "已完成", "copies": "1", "paper": "A4", "duplex": "单面", "pages": "2"},
+        {"time": "无时间", "status": "已完成", "copies": "1", "paper": "A4", "duplex": "单面", "pages": "5"},
+        {"time": _yesterday + " 08:00:00", "status": "登录", "copies": "", "paper": "", "duplex": "", "pages": ""},
+    ]
+    days = stats.aggregate_rows(rows)
+    check("只按「已完成」聚合（失败/取消/登录不算，脏行跳过）", len(days), 2)
+    today = days.get(_today) or stats.new_bucket()
+    check("当日任务数", today.get("tasks"), 3)
+    check("当日份数", today.get("copies"), 4)
+    check("当日页数（每份页数 × 份数：6+4+1）", today.get("pages"), 11)
+    check("当日用纸张数（双面 3 页=2 张 ×2 份 + 4 + 1）", today.get("sheets"), 9)
+    check("按纸张分组（A4）", today.get("papers", {}).get("A4"), {"copies": 3, "pages": 10, "sheets": 8})
+    check("按单双面分组（双面）", today.get("duplex", {}).get("双面"), {"copies": 2, "pages": 6, "sheets": 4})
+    check("按单双面分组（单面）", today.get("duplex", {}).get("单面"), {"copies": 2, "pages": 5, "sheets": 5})
+
+    check("累计：两天合并的任务数", stats.summarize(days, None).get("tasks"), 4)
+    check("累计：两天合并的页数", stats.summarize(days, None).get("pages"), 13)
+    check("窗口=1 天只含今天", stats.summarize(days, 1).get("tasks"), 3)
+    check("窗口=7 天含两天", stats.summarize(days, 7).get("tasks"), 4)
+    check("合并后分布表也累加（累计 A4 份数）", stats.summarize(days, None).get("papers", {}).get("A4", {}).get("copies"), 4)
+
+    print("== 离线样例测试：A3 拆 A4（服务端矢量裁剪的纯函数） ==")
+    check("单条 0.5 → 两段", split.segment_ranges([0.5]), [(0.0, 0.5), (0.5, 1.0)])
+    check(
+        "乱序 + 重复会去重排序",
+        split.segment_ranges([0.66, 0.33, 0.66]),
+        [(0.0, 0.33), (0.33, 0.66), (0.66, 1.0)],
+    )
+    check("无裁切线 → 整页一段", split.segment_ranges([]), [(0.0, 1.0)])
+    check("越界比例被忽略（0 / 1 / >1 / <0）", split.segment_ranges([0, 1, 1.5, -1, 0.5]), [(0.0, 0.5), (0.5, 1.0)])
+    check("超出页数的裁切项被裁掉", split.normalize_cuts([[0.5], [0.4], [0.3]], 2), [[0.5], [0.4]])
+    check("缺页按「整页」补齐", split.normalize_cuts([[0.5]], 3), [[0.5], [], []])
+    check("空参数 = 每页整页", split.normalize_cuts(None, 2), [[], []])
+    check("预估输出页数（2 + 1 + 3）", split.count_output_pages([[0.5], [], [0.33, 0.66]], 3), 6)
+    check("拆分说明的 per_page", split.summarize([[0.5], []], 2)["per_page"], [2, 1])
+    check("A4 尺寸常量（595×842 点）", (round(split.A4_WIDTH_PT), round(split.A4_HEIGHT_PT)), (595, 842))
+
+    for bad, label in (([[1.5]], "比例 >1"), ([[-0.2]], "比例 <0"), ([["x"]], "非数字"), ("oops", "整体不是数组")):
+        try:
+            split.normalize_cuts(bad, 1)
+            check_true("非法裁切参数应报错（%s）" % label, False)
+        except ValueError as exc:
+            check_true("非法裁切参数已报错（%s）：%s" % (label, exc), True)
 
 
 def run_live() -> None:

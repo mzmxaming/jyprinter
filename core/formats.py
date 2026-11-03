@@ -15,6 +15,12 @@ PDF_EXTS = {"pdf"}
 # Office / WPS（9 种，需要本机办公软件转换）
 OFFICE_EXTS = {"doc", "docx", "xls", "xlsx", "ppt", "pptx", "wps", "et", "dps"}
 
+# 表格类（3 种）：转换前可按需设置「适应一页宽」，避免宽表被拆成多页
+SPREADSHEET_EXTS = {"xls", "xlsx", "et"}
+
+# 文字处理类（Word 系，2 种 + WPS 文字）
+DOCUMENT_EXTS = {"doc", "docx", "wps"}
+
 # 全部支持格式（共 20 种）
 SUPPORTED_EXTS = IMAGE_EXTS | TEXT_EXTS | PDF_EXTS | OFFICE_EXTS
 
@@ -57,6 +63,28 @@ def is_office_ext(ext: str) -> bool:
         bool，属于 Office/WPS 家族则返回 True
     """
     return normalize_ext(ext) in OFFICE_EXTS
+
+
+def is_spreadsheet_ext(ext: str) -> bool:
+    """判断扩展名是否属于表格类（Excel / WPS 表格）。
+
+    参数：
+        ext - 扩展名（可带点）
+    返回：
+        bool，表格类返回 True
+    """
+    return normalize_ext(ext) in SPREADSHEET_EXTS
+
+
+def is_document_ext(ext: str) -> bool:
+    """判断扩展名是否属于文字处理类（Word / WPS 文字）。
+
+    参数：
+        ext - 扩展名（可带点）
+    返回：
+        bool，文字处理类返回 True
+    """
+    return normalize_ext(ext) in DOCUMENT_EXTS
 
 
 def ext_list_text() -> str:

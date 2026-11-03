@@ -66,7 +66,7 @@ LOG_DIR: Path = DATA_DIR / "logs"
 CONFIG_PATH: Path = _resolve_config_path()
 
 # 产品与开发者信息（用于页面、托盘「关于」与控制台横幅展示）
-VERSION = "1.3.0"
+VERSION = "1.7.1"
 PRODUCT_NAME = "网络打印服务"
 DEVELOPER_NAME = "陈光明"
 DEVELOPER_WECHAT = "cgm10050"
@@ -88,11 +88,14 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "scale_percent": 100,             # scale=custom 时的默认百分比
     "color": "color",                 # 默认颜色模式：color 彩色 / mono 黑白
     "quality": "normal",              # 默认打印质量：draft 草稿 / normal 标准 / high 高清
+    "orientation": "auto",            # 默认出纸方向：auto 跟随文档 / portrait 纵向 / landscape 横向
+    "fit_table": True,                # 表格类文件转换前是否设为「适应一页宽」（仅 Windows 生效）
     "filter_virtual_printers": True,  # 是否在网页端过滤虚拟打印机
     "require_confirmation": False,    # 上传后是否必须先预览确认再打印
     "hide_console_on_start": True,    # 托盘模式下启动后自动隐藏控制台窗口
     "task_timeout_seconds": 180,      # 单个任务的打印完成等待上限（秒）
     "file_ttl_minutes": 30,           # 上传文件的存活时间（分钟），超时自动清理
+    "keep_file_after_print": False,   # 打印成功后是否保留源文件：False 立即删除（默认）；True 保留以便界面「重打」
     "log_keep_days": 7,               # 打印日志保留天数
     "max_upload_mb": 100,             # 单文件上传大小上限（MB）
 }

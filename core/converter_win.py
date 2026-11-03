@@ -26,7 +26,7 @@ import win32api
 import win32com.client
 import win32con
 
-from core import settings
+from core import render, settings
 from core.formats import OFFICE_EXTS, is_office_ext  # noqa: F401 - 统一由 formats 定义，此处转发
 from core.utils import import_pymupdf, remove_file
 
@@ -52,6 +52,12 @@ WD_EXPORT_FORMAT_PDF = 17        # wdExportFormatPDF
 WD_DO_NOT_SAVE_CHANGES = 0       # wdDoNotSaveChanges
 XL_EXPORT_TYPE_PDF = 0           # xlTypePDF
 PP_SAVE_AS_PDF = 32              # ppSaveAsPDF
+
+# 页面设置枚举（用于转换前按用户选择调整文档版式）
+WD_ORIENT_PORTRAIT = 0           # wdOrientPortrait
+WD_ORIENT_LANDSCAPE = 1          # wdOrientLandscape
+XL_ORIENT_PORTRAIT = 1           # xlPortrait
+XL_ORIENT_LANDSCAPE = 2          # xlLandscape
 
 # LibreOffice 常见安装路径
 SOFFICE_CANDIDATES = (
@@ -110,12 +116,14 @@ def find_soffice() -> Optional[str]:
     return None
 
 
-def convert_to_pdf(source: Path, ext: str) -> Path:
+def convert_to_pdf(source: Path, ext: str, options: Any = None) -> Path:
     """把 Office/WPS 文档转换为 PDF。
 
     参数：
-        source - 源文件绝对路径（建议为纯 ASCII 路径）
-        ext    - 源文件扩展名
+        source  - 源文件绝对路径（建议为纯 ASCII 路径）
+        ext     - 源文件扩展名
+        options - render.RenderOptions；其中 orientation 与 fit_table 会影响文档版式，
+                  因此它们被编入产物文件名，避免复用到设置不同的转换结果
     返回：
         Path，生成的 PDF 路径（位于 data/converted）
     异常：
@@ -128,9 +136,9 @@ def convert_to_pdf(source: Path, ext: str) -> Path:
         raise RuntimeError("文件不存在或已被清理")
 
     settings.CONVERTED_DIR.mkdir(parents=True, exist_ok=True)
-    target = settings.CONVERTED_DIR / f"{source.stem}.pdf"
+    target = settings.CONVERTED_DIR / f"{source.stem}_{_layout_tag(options)}.pdf"
     if _is_reusable(target, source):
-        # 预览阶段已转换过，直接复用，避免打印时重复转换
+        # 预览阶段已用同样版式设置转换过，直接复用，避免打印时重复转换
         return target
     remove_file(target)
 
@@ -141,7 +149,7 @@ def convert_to_pdf(source: Path, ext: str) -> Path:
             attempts.append(f"{progid}：未安装或未注册")
             continue
         try:
-            _convert_with_com(source, target, normalized, progid)
+            _convert_with_com(source, target, normalized, progid, options)
             pages = _validate_pdf(target)
             print(f"[转换] .{normalized} → PDF 成功，引擎 {progid}，共 {pages} 页", flush=True)
             return target
@@ -152,7 +160,7 @@ def convert_to_pdf(source: Path, ext: str) -> Path:
     soffice = find_soffice()
     if soffice:
         try:
-            _convert_with_soffice(soffice, source, settings.CONVERTED_DIR)
+            _convert_with_soffice(soffice, source, target)
             pages = _validate_pdf(target)
             print(f"[转换] .{normalized} → PDF 成功，引擎 LibreOffice，共 {pages} 页", flush=True)
             return target
@@ -169,7 +177,23 @@ def convert_to_pdf(source: Path, ext: str) -> Path:
     )
 
 
-def _convert_with_com(source: Path, target: Path, ext: str, progid: str) -> None:
+def _layout_tag(options: Any) -> str:
+    """把影响文档分页的选项编码为文件名后缀。
+
+    参数：
+        options - render.RenderOptions 或 None
+    返回：
+        str，形如 "auto_1"（方向_是否适应一页宽）
+    """
+    opts = options or render.RenderOptions()
+    name = str(getattr(opts, "orientation", "auto") or "auto").lower()
+    short = "land" if name == "landscape" else ("port" if name == "portrait" else "auto")
+    return f"{short}_{1 if getattr(opts, 'fit_table', True) else 0}"
+
+
+def _convert_with_com(
+    source: Path, target: Path, ext: str, progid: str, options: Any = None
+) -> None:
     """使用指定 COM 引擎执行转换（窗口隐藏）。
 
     参数：
@@ -189,9 +213,9 @@ def _convert_with_com(source: Path, target: Path, ext: str, progid: str) -> None
     try:
         app = win32com.client.DispatchEx(progid)
         if family == "word":
-            _word_to_pdf(app, source, target)
+            _word_to_pdf(app, source, target, options)
         elif family == "excel":
-            _excel_to_pdf(app, source, target)
+            _excel_to_pdf(app, source, target, options)
         else:
             _powerpoint_to_pdf(app, source, target)
     finally:
@@ -284,13 +308,58 @@ def _reap_leftovers(family: str, existing: Set[int]) -> int:
     return cleaned
 
 
-def _word_to_pdf(app: Any, source: Path, target: Path) -> None:
+def _apply_orientation(com_object: Any, options: Any, landscape: int, portrait: int) -> None:
+    """按用户选择设置页面的横向 / 纵向（引擎不支持时忽略）。
+
+    参数：
+        com_object - 具备 PageSetup 的 COM 对象（文档 / 工作表）
+        options    - render.RenderOptions
+        landscape  - 该引擎的横向枚举值
+        portrait   - 该引擎的纵向枚举值
+    返回：
+        None
+    """
+    if options is None:
+        return
+    wanted = options.wants_landscape()
+    if wanted is None:
+        return
+    setup = getattr(com_object, "PageSetup", None)
+    if setup is not None:
+        _set(setup, "Orientation", landscape if wanted else portrait)
+
+
+def _apply_sheet_setup(sheet: Any, options: Any) -> None:
+    """按用户选择设置工作表页面（缩放 / 方向）。
+
+    勾选「适应一页宽」时设为「一页宽、不限页高」：宽表不再被拆到多页；
+    文件里已有的打印区域不受影响（不触碰 PrintArea）。
+
+    参数：
+        sheet   - 工作表 COM 对象
+        options - render.RenderOptions
+    返回：
+        None
+    """
+    setup = getattr(sheet, "PageSetup", None)
+    if setup is None:
+        return
+    if options is not None and getattr(options, "fit_table", True):
+        # 顺序要求：先关闭按比例缩放，才能启用「适应 N 页宽」
+        _set(setup, "Zoom", False)
+        _set(setup, "FitToPagesWide", 1)
+        _set(setup, "FitToPagesTall", False)
+    _apply_orientation(sheet, options, XL_ORIENT_LANDSCAPE, XL_ORIENT_PORTRAIT)
+
+
+def _word_to_pdf(app: Any, source: Path, target: Path, options: Any = None) -> None:
     """Word 系：打开文档并导出为 PDF。
 
     参数：
-        app    - Word 系 COM 应用对象
-        source - 源文件路径
-        target - 目标 PDF 路径
+        app     - Word 系 COM 应用对象
+        source  - 源文件路径
+        target  - 目标 PDF 路径
+        options - render.RenderOptions（用于按需改写页面方向）
     返回：
         None
     异常：
@@ -304,6 +373,7 @@ def _word_to_pdf(app: Any, source: Path, target: Path) -> None:
     if document is None:
         raise RuntimeError("打开文档失败")
     try:
+        _apply_orientation(document, options, WD_ORIENT_LANDSCAPE, WD_ORIENT_PORTRAIT)
         export = getattr(document, "ExportAsFixedFormat", None)
         if export is not None:
             try:
@@ -321,13 +391,14 @@ def _word_to_pdf(app: Any, source: Path, target: Path) -> None:
         _safe_call(document, "Close", WD_DO_NOT_SAVE_CHANGES)
 
 
-def _excel_to_pdf(app: Any, source: Path, target: Path) -> None:
-    """Excel 系：打开工作簿并导出为 PDF。
+def _excel_to_pdf(app: Any, source: Path, target: Path, options: Any = None) -> None:
+    """Excel 系：按需设置工作表页面后导出为 PDF。
 
     参数：
-        app    - Excel 系 COM 应用对象
-        source - 源文件路径
-        target - 目标 PDF 路径
+        app     - Excel 系 COM 应用对象
+        source  - 源文件路径
+        target  - 目标 PDF 路径
+        options - render.RenderOptions（fit_table 控制「适应一页宽」，orientation 控制方向）
     返回：
         None
     异常：
@@ -341,12 +412,36 @@ def _excel_to_pdf(app: Any, source: Path, target: Path) -> None:
     if book is None:
         raise RuntimeError("打开工作簿失败")
     try:
+        _apply_workbook_setup(book, options)
         export = getattr(book, "ExportAsFixedFormat", None)
         if export is None:
             raise RuntimeError("该表格引擎不支持导出 PDF")
         export(XL_EXPORT_TYPE_PDF, str(target))
     finally:
         _safe_call(book, "Close", False)
+
+
+def _apply_workbook_setup(book: Any, options: Any) -> None:
+    """对工作簿内所有工作表应用页面设置（单表失败不影响其他表与整体转换）。
+
+    参数：
+        book    - 工作簿 COM 对象
+        options - render.RenderOptions
+    返回：
+        None
+    """
+    if options is None:
+        return
+    try:
+        sheets = book.Worksheets
+        count = int(getattr(sheets, "Count", 0) or 0)
+    except Exception:
+        return
+    for index in range(1, count + 1):
+        try:
+            _apply_sheet_setup(sheets(index), options)
+        except Exception:
+            continue
 
 
 def _powerpoint_to_pdf(app: Any, source: Path, target: Path) -> None:
@@ -386,18 +481,23 @@ def _powerpoint_to_pdf(app: Any, source: Path, target: Path) -> None:
         _safe_call(presentation, "Close")
 
 
-def _convert_with_soffice(soffice: str, source: Path, out_dir: Path) -> None:
-    """使用 LibreOffice headless 执行转换。
+def _convert_with_soffice(soffice: str, source: Path, target: Path) -> None:
+    """使用 LibreOffice headless 执行转换（作为 COM 不可用时的降级方案）。
+
+    说明：LibreOffice 无法按用户选择改写文档页面设置，因此该路径只做格式转换，
+    文档版式沿用文件自身设置。
 
     参数：
         soffice - soffice 可执行文件路径
         source  - 源文件路径
-        out_dir - 输出目录
+        target  - 目标 PDF 路径（LibreOffice 按源文件名输出，这里改名到目标路径）
     返回：
         None
     异常：
         RuntimeError - 进程超时或执行失败
     """
+    produced = target.parent / f"{source.stem}.pdf"
+    remove_file(produced)
     command = [
         soffice,
         "--headless",
@@ -405,7 +505,7 @@ def _convert_with_soffice(soffice: str, source: Path, out_dir: Path) -> None:
         "--convert-to",
         "pdf:writer_pdf_Export",
         "--outdir",
-        str(out_dir),
+        str(target.parent),
         str(source),
     ]
     try:
@@ -420,6 +520,11 @@ def _convert_with_soffice(soffice: str, source: Path, out_dir: Path) -> None:
     if result.returncode != 0:
         detail = (result.stderr or b"").decode("utf-8", errors="replace")[:160]
         raise RuntimeError(f"退出码 {result.returncode} {detail}".strip())
+    if produced != target:
+        if not produced.exists():
+            raise RuntimeError("LibreOffice 未生成 PDF 文件")
+        remove_file(target)
+        produced.replace(target)
 
 
 def _is_reusable(target: Path, source: Path) -> bool:

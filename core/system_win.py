@@ -122,12 +122,25 @@ def _launch_command() -> str:
     return f'"{sys.executable}" "{script}"'
 
 
+def has_console() -> bool:
+    """判断当前进程是否挂着控制台窗口。
+
+    说明：打包为「无控制台程序」（PyInstaller `console=False`）时返回 False，
+    此时控制台相关的菜单项与自动隐藏都应跳过。
+
+    参数：无
+    返回：
+        bool，存在控制台窗口返回 True
+    """
+    return bool(_console_handle())
+
+
 def console_visible() -> bool:
     """判断当前控制台窗口是否可见。
 
     参数：无
     返回：
-        bool，可见返回 True（无控制台时返回 False）
+        bool，可见返回 True（隐藏时返回 False，无控制台时返回 False）
     """
     handle = _console_handle()
     return bool(handle) and bool(ctypes.windll.user32.IsWindowVisible(handle))
@@ -145,13 +158,17 @@ def toggle_console() -> Tuple[bool, str]:
         return False, "当前没有控制台窗口（可能以 pythonw 或打包模式运行）"
     if ctypes.windll.user32.IsWindowVisible(handle):
         ctypes.windll.user32.ShowWindow(handle, 0)   # SW_HIDE
-        return True, "控制台已隐藏"
+        return True, "控制台已隐藏（托盘菜单可选「显示控制台」找回）"
     ctypes.windll.user32.ShowWindow(handle, 5)       # SW_SHOW
+    ctypes.windll.user32.SetForegroundWindow(handle)
     return True, "控制台已显示"
 
 
 def hide_console() -> Tuple[bool, str]:
     """隐藏当前控制台窗口（用于启动后自动转入后台）。
+
+    说明：用 `SW_HIDE` 彻底隐藏，任务栏上不会留下 CMD 按钮；需要查看时用托盘菜单
+    「显示控制台」随时唤回。
 
     参数：无
     返回：
@@ -163,7 +180,7 @@ def hide_console() -> Tuple[bool, str]:
     if not ctypes.windll.user32.IsWindowVisible(handle):
         return True, "控制台已是隐藏状态"
     ctypes.windll.user32.ShowWindow(handle, 0)       # SW_HIDE
-    return True, "控制台已隐藏"
+    return True, "控制台已隐藏（托盘菜单可选「显示控制台」找回）"
 
 
 def _console_handle() -> int:

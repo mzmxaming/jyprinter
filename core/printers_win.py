@@ -227,14 +227,18 @@ def resolve_paper_id(printer_name: str, paper_name: str) -> int:
 
 
 def build_devmode(
-    printer_name: str, paper_id: Optional[int] = None, duplex: Optional[str] = None
+    printer_name: str,
+    paper_id: Optional[int] = None,
+    duplex: Optional[str] = None,
+    orientation: Optional[str] = None,
 ) -> Any:
-    """构造带纸张/双面设置的 DEVMODE，用于创建打印机 DC。
+    """构造带纸张/双面/方向设置的 DEVMODE，用于创建打印机 DC。
 
     参数：
         printer_name - 打印机名称
         paper_id     - 纸张 ID，None 表示保持驱动默认
         duplex       - "simplex" 单面 / "vertical" 双面长边翻转，None 表示保持驱动默认
+        orientation  - "landscape" 横向 / "portrait" 纵向，None 表示保持驱动默认
     返回：
         PyDEVMODE，可直接传给 win32gui.CreateDC
     """
@@ -257,6 +261,15 @@ def build_devmode(
         )
         devmode.Fields |= win32con.DM_DUPLEX
 
+    if orientation:
+        # 纸张方向：设置后可打印区的宽高会随方向交换
+        devmode.Orientation = (
+            win32con.DMORIENT_LANDSCAPE
+            if str(orientation).lower() == "landscape"
+            else win32con.DMORIENT_PORTRAIT
+        )
+        devmode.Fields |= win32con.DM_ORIENTATION
+
     return devmode
 
 
@@ -277,6 +290,29 @@ def status_of(printer_name: str) -> str:
     return _status_text(info.get("Status", 0))
 
 
+def _list_jobs(printer_name: str) -> Optional[List[Dict[str, Any]]]:
+    """枚举打印队列中的全部作业（含已完成但被驱动保留的条目）。
+
+    参数：
+        printer_name - 打印机名称
+    返回：
+        list[dict]，作业信息列表；查询失败则返回 None
+        （ImportError 也归为失败：EnumJobs 会把作业提交时间转成带时区的 datetime，
+          该转换由 pywintypes 动态导入 win32timezone 完成，打包环境缺该模块会抛
+          ModuleNotFoundError，此时只是「查不到」而不是「打印失败」）
+    """
+    if not printer_name:
+        return None
+    try:
+        handle = win32print.OpenPrinter(printer_name)
+        try:
+            return list(win32print.EnumJobs(handle, 0, 999, 1))
+        finally:
+            win32print.ClosePrinter(handle)
+    except (pywintypes.error, OSError, ImportError):
+        return None
+
+
 def count_jobs(printer_name: str) -> int:
     """统计打印机的当前**未完成**任务数（含其他程序提交的任务）。
 
@@ -288,20 +324,68 @@ def count_jobs(printer_name: str) -> int:
     参数：
         printer_name - 打印机名称
     返回：
-        int，未完成的任务数；查询失败返回 -1
+        int，未完成的任务数；查询失败返回 -1（调用方据此不判定失败，见 tasks._wait_spool_drain）
     """
-    if not printer_name:
+    jobs = _list_jobs(printer_name)
+    if jobs is None:
         return -1
+    return sum(
+        1 for job in jobs if not int(job.get("Status", 0) or 0) & _JOB_FINISHED_STATUS
+    )
+
+
+def job_ids(printer_name: str) -> List[int]:
+    """列出打印队列中所有作业的作业号。
+
+    用途：GDI 的 `StartDoc` 不返回作业号（实测返回 None），因此在提交前后各取一次
+    队列快照，用「新出现的作业号」认领本程序刚提交的作业，供「打印中取消」使用。
+
+    参数：
+        printer_name - 打印机名称
+    返回：
+        list[int]，作业号列表；查询失败返回空列表
+    """
+    jobs = _list_jobs(printer_name)
+    if jobs is None:
+        return []
+    return [int(job.get("JobId", 0) or 0) for job in jobs]
+
+
+def new_job_id(printer_name: str, known_ids: Any) -> Optional[int]:
+    """在提交作业后找出「新出现」的作业号。
+
+    参数：
+        printer_name - 打印机名称
+        known_ids    - 提交前调用 job_ids() 得到的作业号集合
+    返回：
+        int 或 None，新出现的作业号（多个时取最大）；取不到返回 None
+    """
+    known = {int(item) for item in (known_ids or [])}
+    fresh = [job_id for job_id in job_ids(printer_name) if job_id and job_id not in known]
+    return max(fresh) if fresh else None
+
+
+def cancel_job(printer_name: str, job_id: Any) -> Tuple[bool, str]:
+    """取消打印队列中的指定作业（用于「打印中取消」）。
+
+    说明：只能撤回**尚未转成纸**的部分；已经出纸的页面无法收回。
+
+    参数：
+        printer_name - 打印机名称
+        job_id       - 作业号（GDI 提交后通过 new_job_id 取得）
+    返回：
+        (是否成功, 说明文本)
+    """
+    if not printer_name or not job_id:
+        return False, "缺少打印机或作业号，无法取消打印队列作业"
     try:
         handle = win32print.OpenPrinter(printer_name)
         try:
-            jobs = win32print.EnumJobs(handle, 0, 999, 1)
-            return sum(
-                1
-                for job in jobs
-                if not int(job.get("Status", 0) or 0) & _JOB_FINISHED_STATUS
+            win32print.SetJob(
+                handle, int(job_id), 0, None, win32print.JOB_CONTROL_CANCEL
             )
+            return True, "已从打印队列中取消该作业"
         finally:
             win32print.ClosePrinter(handle)
-    except (pywintypes.error, OSError):
-        return -1
+    except (pywintypes.error, OSError, ValueError) as exc:
+        return False, f"取消打印队列作业失败：{exc}"

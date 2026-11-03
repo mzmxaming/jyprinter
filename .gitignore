@@ -27,3 +27,6 @@ android/local.properties
 android/.kotlin/
 *.iml
 *.hprof
+
+# ---- 上游快照目录（另一位开发者的 1.7.1 版本副本，仅作合并来源，不入库）----
+/jyprinter/

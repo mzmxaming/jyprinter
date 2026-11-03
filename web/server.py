@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import json
 import socket
 import uuid
 from pathlib import Path
@@ -11,7 +12,7 @@ from typing import Any, Dict, List, Tuple
 from flask import Flask, jsonify, render_template, request, send_file
 from werkzeug.middleware.proxy_fix import ProxyFix
 
-from core import audit, converter, engines, preview, printers, render, settings
+from core import audit, converter, engines, preview, printers, render, settings, split, stats
 from core.tasks import TaskQueue
 from core.utils import get_all_local_ips, resolve_client_host, sanitize_filename
 from web import auth
@@ -61,6 +62,71 @@ def create_app(task_queue: TaskQueue) -> Flask:
             engines=_engine_summary(),
             access=_access_info(),
             qr_available=_qr_available(),
+        )
+
+    @app.get("/a3-to-a4")
+    def a3_split_page() -> str:
+        """渲染「A3 页面拆分为 A4」工具页。
+
+        纯前端工具：文件在浏览器内用 pdf.js 读取、jsPDF 导出，**不上传、不经过服务端**；
+        需要登录后访问（入口在首页顶栏），与主界面共用同一套品牌顶栏。
+
+        参数：无
+        返回：
+            str，渲染后的 HTML
+        """
+        account = auth.current_user() or {"username": "", "role": "user"}
+        return render_template(
+            "a3_split.html",
+            brand=settings.brand(),
+            user=account,
+            is_admin=auth.is_admin(),
+        )
+
+    @app.post("/api/split-a4")
+    def api_split_a4() -> Any:
+        """把上传的 A3 PDF 沿裁切线拆成 A4（服务端矢量裁剪，输出真矢量 PDF）。
+
+        与浏览器内拆分的区别：这里用 PyMuPDF 把源页的一段**原样搬运**到 A4 新页上，
+        文字仍是文字、矢量仍是矢量（浏览器内那条链路导出的是位图）。
+        文件只在内存里处理、处理完即释放，不落临时文件、不进打印队列、不写审计日志。
+
+        参数（multipart 表单）：
+            files - 一个 PDF 文件
+            cuts  - JSON 数组，每个元素是**对应页**的裁切比例列表，
+                    例如 [[0.5], [], [0.33,0.66]]；元素为空表示该页整页缩放到一张 A4
+        返回：
+            PDF 文件（附件下载）；参数不合法时返回 JSON {ok:false, error}
+        """
+        files = _collect_files()
+        if not files:
+            return jsonify({"ok": False, "error": "未收到文件"}), 400
+        if len(files) > 1:
+            return jsonify({"ok": False, "error": "矢量拆分一次只处理一个 PDF 文件"}), 400
+
+        storage = files[0]
+        name = sanitize_filename(storage.filename or "")
+        if engines.normalize_ext(Path(name).suffix) != "pdf":
+            return jsonify({"ok": False, "error": "矢量拆分仅支持 PDF（图片请用浏览器内拆分）"}), 400
+
+        raw_cuts = (request.form.get("cuts") or "").strip()
+        try:
+            cuts = json.loads(raw_cuts) if raw_cuts else None
+        except ValueError:
+            return jsonify({"ok": False, "error": "裁切参数不是合法的 JSON"}), 400
+
+        try:
+            data = split.split_pdf_bytes(storage.read(), cuts)
+        except ValueError as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 400
+        except Exception as exc:  # noqa: BLE001 - 兜底：不让底层异常变成 500 页面
+            return jsonify({"ok": False, "error": "矢量拆分失败：%s" % exc}), 500
+
+        return send_file(
+            io.BytesIO(data),
+            mimetype="application/pdf",
+            as_attachment=True,
+            download_name="拆分后页面_A4_矢量.pdf",
         )
 
     @app.get("/api/printers")
@@ -130,6 +196,8 @@ def create_app(task_queue: TaskQueue) -> Flask:
             scale_percent  - 自定义缩放百分比（10~400）
             color          - color 彩色 / mono 黑白
             quality        - draft 草稿 / normal 标准 / high 高清
+            orientation    - auto 跟随文档 / portrait 纵向 / landscape 横向
+            fit_table      - 表格类文件是否设为「适应一页宽」
         返回：
             JSON，{ok, tasks: [...], rejected: [{filename, reason}]}
         """
@@ -166,6 +234,12 @@ def create_app(task_queue: TaskQueue) -> Flask:
         quality = (form.get("quality") or settings.get("quality", "normal")).strip()
         if quality not in ("draft", "normal", "high"):
             quality = "normal"
+        orientation = (form.get("orientation") or settings.get("orientation", "auto")).strip()
+        if orientation not in ("auto", "portrait", "landscape"):
+            orientation = "auto"
+        fit_table = _flag(
+            form.get("fit_table"), bool(settings.get("fit_table", True))
+        )
 
         client_ip, client_host = _client_info()
         account = auth.current_user() or {}
@@ -215,6 +289,8 @@ def create_app(task_queue: TaskQueue) -> Flask:
                 scale_percent=scale_percent,
                 color=color,
                 quality=quality,
+                orientation=orientation,
+                fit_table=fit_table,
                 client_ip=client_ip,
                 client_host=client_host,
                 user=account.get("username", ""),
@@ -244,7 +320,10 @@ def create_app(task_queue: TaskQueue) -> Flask:
 
     @app.post("/api/tasks/<task_id>/cancel")
     def api_cancel(task_id: str) -> Any:
-        """取消排队中或待确认的任务。
+        """取消任务（待确认 / 排队中立即取消；打印中为协作式中止）。
+
+        打印中的取消只撤回尚未出纸的部分，已经出纸的页面无法收回；两种情况下
+        都会删除该任务的源文件与预览缓存（取消即删除）。
 
         参数：
             task_id - 任务 ID（路径参数）
@@ -261,7 +340,7 @@ def create_app(task_queue: TaskQueue) -> Flask:
 
     @app.post("/api/tasks/<task_id>/retry")
     def api_retry(task_id: str) -> Any:
-        """重试失败或已取消的任务。
+        """重试失败或已取消的任务，以及保留了源文件的已完成任务（「重打」）。
 
         参数：
             task_id - 任务 ID（路径参数）
@@ -297,10 +376,13 @@ def create_app(task_queue: TaskQueue) -> Flask:
     def api_preview(task_id: str) -> Any:
         """生成或读取指定任务的预览缩略图。
 
+        预览与打印使用**同一页码范围**：只显示会被打印的那些页，缩略图标注其在原文档中的
+        真实页码（例如页码范围填 `5`，就只出现「第 5 页」）。
+
         参数：
             task_id - 任务 ID（路径参数）
         返回：
-            JSON，{ok, page_count, rendered, pages: [{index, url}]}
+            JSON，{ok, page_count, document_pages, pages_range, rendered, pages: [{index, url}]}
         """
         task = task_queue.get(task_id)
         if task is None:
@@ -314,8 +396,10 @@ def create_app(task_queue: TaskQueue) -> Flask:
 
         stored_path, ext = source
         try:
-            meta = preview.build(task_id, stored_path, ext)
-        except RuntimeError as exc:
+            meta = preview.build(
+                task_id, stored_path, ext, str(task.get("page_range") or "")
+            )
+        except (RuntimeError, ValueError) as exc:
             return jsonify({"ok": False, "error": str(exc)}), 400
 
         pages = [
@@ -326,6 +410,8 @@ def create_app(task_queue: TaskQueue) -> Flask:
             {
                 "ok": True,
                 "page_count": meta.get("page_count", len(pages)),
+                "document_pages": meta.get("document_pages", meta.get("page_count", len(pages))),
+                "pages_range": meta.get("pages_range", ""),
                 "rendered": meta.get("rendered", len(pages)),
                 "pages": pages,
             }
@@ -348,21 +434,33 @@ def create_app(task_queue: TaskQueue) -> Flask:
 
     @app.get("/api/logs")
     def api_logs() -> Any:
-        """查询最近的打印审计日志。
+        """查询最近的打印审计日志（仅管理员）。
 
         参数（查询串）：
             limit - 返回条数上限，默认 50
         返回：
             JSON，{logs: [...]}
         """
-        limit = max(1, min(200, _safe_int(request.args.get("limit"), 50)))
-        logs = audit.recent(500 if not auth.is_admin() else limit)
         if not auth.is_admin():
-            account = auth.current_user() or {}
-            logs = [
-                item for item in logs if item.get("user") == account.get("username")
-            ][:limit]
-        return jsonify({"logs": logs})
+            return jsonify({"ok": False, "error": "打印日志仅管理员可见"}), 403
+        limit = max(1, min(200, _safe_int(request.args.get("limit"), 50)))
+        return jsonify({"logs": audit.recent(limit)})
+
+    @app.get("/api/stats")
+    def api_stats() -> Any:
+        """查询打印量统计（仅管理员）。
+
+        统计口径：只计入**已完成**的任务，失败与取消不计（它们没有消耗纸张）；
+        用纸张数按「单面 1 页/张、双面 2 页/张」估算。
+        数据来自 data/logs/stats.json，独立于审计日志清理，长期累计。
+
+        参数：无
+        返回：
+            JSON，{windows: {today/week/month/all}, first_date, last_date, note, ...}
+        """
+        if not auth.is_admin():
+            return jsonify({"ok": False, "error": "打印统计仅管理员可见"}), 403
+        return jsonify(stats.snapshot())
 
     @app.get("/api/sysinfo")
     def api_sysinfo() -> Any:

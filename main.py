@@ -25,6 +25,33 @@ from web.server import create_app
 WATCH_INTERVAL = 30
 
 
+def _redirect_output_to_file() -> None:
+    """无控制台运行时（打包成「无控制台程序」）把标准输出/错误写入日志文件。
+
+    否则启动横幅与告警（如「LibreOffice 缺失」「网络配置失败」）会随控制台一起消失，
+    出问题时无从查起；文件位置与审计日志同目录：`data/logs/console.log`。
+
+    判定条件：**打包运行且当前进程没有控制台窗口**。
+    注意不能用 `sys.stdout is None` 判断——无控制台打包时 stdout 仍是一个不可写的包装对象，
+    并不会变成 None；也不能只看有没有控制台，否则会干扰源码运行时的终端输出。
+
+    参数：无
+    返回：
+        None
+    """
+    if not getattr(sys, "frozen", False) or system.has_console():
+        return
+    try:
+        settings.LOG_DIR.mkdir(parents=True, exist_ok=True)
+        stream = (settings.LOG_DIR / "console.log").open(
+            "a", encoding="utf-8", errors="replace"
+        )
+    except OSError:
+        return
+    sys.stdout = stream
+    sys.stderr = stream
+
+
 def _configure_stdout() -> None:
     """把标准输出切换为 UTF-8 行缓冲，避免中文乱码与日志不刷新。
 
@@ -120,16 +147,20 @@ def _print_banner(url: str, restarts: int = 0) -> None:
 
 
 def _autohide_console(delay: float = 3.0) -> None:
-    """启动后延时自动隐藏控制台窗口。
+    """启动后延时隐藏控制台窗口。
 
     在等待期间若检测到按键，则保留控制台显示（便于查看启动信息或排查问题）。
-    隐藏后可通过托盘菜单的「显示控制台」重新打开。
+    用 `SW_HIDE` 彻底隐藏，任务栏上不会留下 CMD 按钮；需要查看时用托盘菜单
+    「显示控制台」随时唤回。
 
     参数：
         delay - 自动隐藏前的等待秒数
     返回：
         None
     """
+    if not system.has_console():
+        # 无控制台程序（打包时 console=False）或系统服务形态：没有窗口可隐藏
+        return
     try:
         import msvcrt
     except ImportError:
@@ -149,10 +180,10 @@ def _autohide_console(delay: float = 3.0) -> None:
 
     ok, message = system.hide_console()
     if ok:
-        print("[提示] 控制台已自动隐藏，可在托盘菜单「显示控制台」中重新打开", flush=True)
+        print("[提示] 控制台已隐藏（任务栏不留按钮），可在托盘菜单「显示控制台」中重新打开", flush=True)
         time.sleep(0.3)
     else:
-        print(f"[提示] 未能自动隐藏控制台：{message}", flush=True)
+        print(f"[提示] 未能隐藏控制台：{message}", flush=True)
 
 
 class ServiceSupervisor:
@@ -595,7 +626,8 @@ def _run_tray(url: str, supervisor: ServiceSupervisor) -> None:
             ui(on_toggle_autostart),
         ),
     ]
-    if osinfo.IS_WINDOWS:
+    if osinfo.IS_WINDOWS and system.has_console():
+        # 无控制台程序里没有窗口可显隐，故不显示该菜单项
         menu_items.append(
             MenuItem(
                 lambda item: "隐藏控制台" if system.console_visible() else "显示控制台",
@@ -626,6 +658,7 @@ def main() -> int:
         int，进程退出码（0 正常，1 启动失败）
     """
     args = _parse_args()
+    _redirect_output_to_file()
     _configure_stdout()
     settings.ensure_dirs()
 
@@ -669,12 +702,18 @@ def main() -> int:
         _apply_window_icon()
 
     # 托盘模式下启动后自动隐藏控制台：打包运行默认隐藏；源码运行需加 --hide-console
-    # （直接在终端里跑 python main.py 时不隐藏，避免连带隐藏用户的终端窗口；Linux 无独立控制台）
-    should_hide_console = osinfo.IS_WINDOWS and not args.no_tray and (
-        args.hide_console
-        or (
-            getattr(sys, "frozen", False)
-            and bool(config.get("hide_console_on_start", True))
+    # （直接在终端里跑 python main.py 时不隐藏，避免连带隐藏用户的终端窗口；Linux 无独立控制台；
+    #   无控制台程序则没有窗口可隐藏）
+    should_hide_console = (
+        osinfo.IS_WINDOWS
+        and not args.no_tray
+        and system.has_console()
+        and (
+            args.hide_console
+            or (
+                getattr(sys, "frozen", False)
+                and bool(config.get("hide_console_on_start", True))
+            )
         )
     )
     if should_hide_console:

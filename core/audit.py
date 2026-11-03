@@ -36,6 +36,9 @@ _COLUMNS = [
     "scale",
     "color",
     "quality",
+    "orientation",
+    "fit_table",
+    "pages",
 ]
 
 _DUPLEX_TEXT = {"simplex": "单面", "vertical": "双面"}
@@ -51,6 +54,20 @@ _SCALE_TEXT = {"fit": "适应页面", "actual": "实际大小", "custom": "自�
 _COLOR_TEXT = {"color": "彩色", "mono": "黑白"}
 _QUALITY_TEXT = {"draft": "草稿", "normal": "标准", "high": "高清"}
 _QUALITY_DPI = {"draft": 150, "normal": 300, "high": 600}
+_ORIENTATION_TEXT = {"auto": "自动", "portrait": "纵向", "landscape": "横向"}
+FIT_TABLE_TEXT = "表格适应一页宽"
+
+
+def orientation_text(orientation: str) -> str:
+    """把出纸方向转换为展示文本。
+
+    参数：
+        orientation - auto 跟随文档 / portrait 纵向 / landscape 横向
+    返回：
+        str，中文展示文本
+    """
+    key = str(orientation or "auto").lower()
+    return _ORIENTATION_TEXT.get(key, key)
 
 
 def scale_text(scale: str, percent: Any = 100) -> str:
@@ -107,6 +124,8 @@ def param_text(
     scale_percent: Any = 100,
     color: str = "color",
     quality: str = "normal",
+    orientation: str = "auto",
+    fit_table: bool = False,
 ) -> str:
     """组合打印参数的展示文本（用于队列与日志的「参数」列）。
 
@@ -119,17 +138,21 @@ def param_text(
         scale_percent - scale=custom 时的百分比
         color         - color / mono
         quality       - draft / normal / high
+        orientation   - auto / portrait / landscape
+        fit_table     - 是否启用了「表格适应一页宽」（仅对表格类文件传 True）
     返回：
-        str，形如「1 份 / 单面 / A4 / 全部页 / 适应页面 / 彩色 / 标准（300DPI）」
+        str，形如「1 份 / 单面 / A4 / 自动 / 全部页 / 适应页面 / 彩色 / 标准（300DPI）」
     """
     parts = [
         f"{copies} 份",
         _DUPLEX_TEXT.get(duplex, duplex),
         paper,
+        orientation_text(orientation),
         str(page_range or "").strip() or "全部页",
         scale_text(scale, scale_percent),
         color_text(color),
         quality_text(quality),
+        FIT_TABLE_TEXT if fit_table else "",
     ]
     return " / ".join(str(item) for item in parts if str(item or "").strip())
 
@@ -151,6 +174,9 @@ def record(
     scale_percent: Any = 100,
     color: str = "color",
     quality: str = "normal",
+    orientation: str = "auto",
+    fit_table: bool = False,
+    pages: Any = "",
 ) -> Dict[str, Any]:
     """写入一条打印审计记录（内存 + 文件）。
 
@@ -170,6 +196,9 @@ def record(
         scale_percent - 自定义缩放百分比
         color         - 颜色模式（color / mono）
         quality       - 打印质量（draft / normal / high）
+        orientation   - 出纸方向（auto / portrait / landscape）
+        fit_table     - 是否启用了「表格适应一页宽」
+        pages         - 本次实际打印的每份页数（打印统计使用；未知时留空）
     返回：
         dict，本次写入的记录
     """
@@ -190,6 +219,9 @@ def record(
         "scale": scale_text(scale, scale_percent),
         "color": color_text(color),
         "quality": quality_text(quality),
+        "orientation": orientation_text(orientation),
+        "fit_table": FIT_TABLE_TEXT if fit_table else "",
+        "pages": pages,
     }
     return _write(item)
 
