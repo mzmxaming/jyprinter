@@ -18,7 +18,10 @@ dependencies = [
 product = "网络打印"
 artifact = "jyprinter"
 org = "com.cgm"
-bundle_id = "com.cgm.jyprinter"
+# iOS 的 Bundle ID 必须与签名描述文件里的 App ID 完全一致，
+# 当前证书（ad-hoc 描述文件）对应的是 app.rainbow8311.peach5135。
+# 换证书时同步修改此处，并在 CI 配置对应的 Secrets。
+bundle_id = "app.rainbow8311.peach5135"
 company = "陈光明"
 copyright = "Copyright © 2026 陈光明"
 
