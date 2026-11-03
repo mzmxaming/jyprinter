@@ -2,7 +2,7 @@
 # jyprinter 云端编译打包（GitHub Actions）
 #
 # 触发方式：
-#   1. 手动：GitHub 仓库页面 → Actions → 左侧「三平台编译打包」→ Run workflow
+#   1. 手动：GitHub 仓库页面 → Actions → 左侧「全平台编译打包」→ Run workflow
 #   2. 发布：git tag v1.3.0 && git push origin v1.3.0
 #      → 编译完成后自动创建 Release 并附上全部安装包
 #
@@ -11,9 +11,8 @@
 #   · jyprinter-linux-x86_64-<版本>      麒麟/Linux x86 电脑：tar.gz + .deb + .rpm
 #   · jyprinter-linux-arm64-<版本>       麒麟/Linux ARM64 国产电脑（飞腾/鲲鹏）：tar.gz + .deb + .rpm
 #   · jyprinter-android-<版本>           Android 客户端 APK（debug 签名，可直接安装）
-#
-# 说明：macOS 版（Flet 桌面壳）未纳入流水线，需在 macOS 14+ 的机器上执行
-#       tools/build_macos.sh 本地构建（Flet 内置 Flutter 3.44.8 硬性要求 macOS 14+）。
+#   · jyprinter-macos-<版本>-<架构>       macOS 桌面版 dmg（Apple Silicon / Intel 各一个）
+#   · jyprinter-ios-<版本>               iOS 客户端未签名 IPA（需自行签名安装）
 #
 # 关键点：
 #   · Linux 任务在 ubuntu:20.04 容器内构建（glibc 2.31，与银河麒麟桌面 V10 同基线），
@@ -21,10 +20,12 @@
 #   · ARM64 版使用 GitHub 原生 ARM64 运行器（ubuntu-24.04-arm）构建 —— PyInstaller
 #     不支持交叉编译，必须同架构构建；该运行器对公开仓库免费，私有仓库需付费计划；
 #   · Windows 任务用 Python 3.8 构建，保证产物可在 Windows 7 SP1 运行；
-#   · Android 任务用 JDK 17 + Gradle 8.7 构建 debug APK（可直接安装，无需签名配置）。
+#   · Android 任务用 JDK 17 + Gradle 8.7 构建 debug APK（可直接安装，无需签名配置）；
+#   · macOS / iOS 任务运行在 GitHub 的 macOS 15 运行器上（Flet 内置 Flutter 3.44.8
+#     要求 macOS 14+）；iOS 未配置签名时只产出未签名 IPA，需自行签名安装。
 # =============================================================================
 
-name: 三平台编译打包
+name: 全平台编译打包
 
 on:
   workflow_dispatch:          # 允许在网页上手动触发
@@ -168,10 +169,103 @@ jobs:
           name: jyprinter-android-${{ steps.ver.outputs.VERSION }}
           path: dist/android/*.apk
 
+  # ------------------------------------------------------------ macOS dmg（双架构）
+  build-macos:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: macos-15,       arch: arm64  }   # Apple Silicon
+          - { runner: macos-15-intel, arch: x86_64 }   # Intel
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # pyproject.toml 要求 Python >=3.11,<3.14
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: 构建 .app 并制作 dmg
+        run: bash tools/build_macos.sh
+
+      - name: 按架构重命名 dmg 并读取版本号
+        id: ver
+        run: |
+          V=$(python3 -c "import sys; sys.path.insert(0, '.'); from core import settings; print(settings.VERSION)")
+          mv "dist/jyprinter-macos-${V}.dmg" "dist/jyprinter-macos-${V}-${{ matrix.arch }}.dmg"
+          echo "VERSION=$V" >> "$GITHUB_OUTPUT"
+
+      - name: 上传 macOS 产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: jyprinter-macos-${{ matrix.arch }}-${{ steps.ver.outputs.VERSION }}
+          path: dist/jyprinter-macos-*.dmg
+
+  # ------------------------------------------------------------ iOS 客户端 IPA
+  build-ios:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: 检查构建环境
+        run: |
+          xcodebuild -version
+          pod --version || echo "CocoaPods 缺失，flet 构建时可能失败"
+
+      # 可选签名：在仓库 Secrets 中配置下列变量后自动产出已签名 IPA
+      #   IOS_TEAM_ID / IOS_SIGNING_CERTIFICATE / IOS_PROVISIONING_PROFILE / IOS_EXPORT_METHOD
+      #   IOS_CERT_P12_BASE64 / IOS_CERT_PASSWORD / IOS_PROFILE_BASE64
+      - name: 准备签名（可选）
+        env:
+          P12: ${{ secrets.IOS_CERT_P12_BASE64 }}
+          P12_PASSWORD: ${{ secrets.IOS_CERT_PASSWORD }}
+          PROFILE: ${{ secrets.IOS_PROFILE_BASE64 }}
+        run: |
+          if [ -z "$P12" ]; then
+            echo "未配置签名证书，走未签名构建"
+            exit 0
+          fi
+          echo "$P12" | base64 --decode > /tmp/cert.p12
+          security create-keychain -p actions build.keychain
+          security default-keychain -s build.keychain
+          security unlock-keychain -p actions build.keychain
+          security import /tmp/cert.p12 -k build.keychain -P "$P12_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k actions build.keychain >/dev/null
+          mkdir -p ~/Library/MobileDevice/Provisioning\ Profiles
+          if [ -n "$PROFILE" ]; then
+            echo "$PROFILE" | base64 --decode > /tmp/profile.mobileprovision
+            cp /tmp/profile.mobileprovision ~/Library/MobileDevice/Provisioning\ Profiles/
+          fi
+
+      - name: 构建 iOS 安装包
+        env:
+          IOS_TEAM_ID: ${{ secrets.IOS_TEAM_ID }}
+          IOS_SIGNING_CERTIFICATE: ${{ secrets.IOS_SIGNING_CERTIFICATE }}
+          IOS_PROVISIONING_PROFILE: ${{ secrets.IOS_PROVISIONING_PROFILE }}
+          IOS_EXPORT_METHOD: ${{ secrets.IOS_EXPORT_METHOD }}
+        run: bash tools/build_ios.sh
+
+      - name: 读取版本号
+        id: ver
+        run: |
+          V=$(python3 -c "import sys; sys.path.insert(0, '.'); from core import settings; print(settings.VERSION)")
+          echo "VERSION=$V" >> "$GITHUB_OUTPUT"
+
+      - name: 上传 iOS 产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: jyprinter-ios-${{ steps.ver.outputs.VERSION }}
+          path: dist/ios/*.ipa
+
   # ------------------------------------------------------------ 打标签时发布 Release
   release:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [build-windows, build-linux, build-android]
+    needs: [build-windows, build-linux, build-android, build-macos, build-ios]
     runs-on: ubuntu-latest
     steps:
       - name: 汇总全部平台产物
