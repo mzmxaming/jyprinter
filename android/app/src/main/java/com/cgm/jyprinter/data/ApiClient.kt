@@ -31,6 +31,8 @@ import java.util.concurrent.TimeUnit
  * @param scalePercent 自定义缩放百分比（10~400）
  * @param color color / mono
  * @param quality draft / normal / high
+ * @param orientation auto / portrait / landscape
+ * @param fitTable 表格类文档是否设为「适应一页宽」
  */
 data class PrintOptions(
     val printer: String,
@@ -42,6 +44,8 @@ data class PrintOptions(
     val scalePercent: Int,
     val color: String,
     val quality: String,
+    val orientation: String = "auto",
+    val fitTable: Boolean = true,
 )
 
 /**
@@ -214,6 +218,8 @@ class ApiClient(private val prefs: Prefs) {
             .addFormDataPart("scale_percent", options.scalePercent.toString())
             .addFormDataPart("color", options.color)
             .addFormDataPart("quality", options.quality)
+            .addFormDataPart("orientation", options.orientation)
+            .addFormDataPart("fit_table", if (options.fitTable) "1" else "0")
             .addFormDataPart(
                 "files",
                 displayName,
@@ -274,6 +280,106 @@ class ApiClient(private val prefs: Prefs) {
      * @return 服务端提示
      */
     suspend fun retry(id: String): String = action("/api/tasks/$id/retry")
+
+    /**
+     * 把 A3 PDF 沿裁切线拆成 A4（服务端矢量裁剪，文字与矢量原样保留）。
+     *
+     * @param file 源 PDF 文件
+     * @param displayName 原始文件名
+     * @param cuts 每页裁切比例的 JSON 数组，如 [[0.5],[0.5]]
+     * @return 拆分后的 PDF 字节
+     * @throws ApiException 鉴权失效、参数错误或网络异常
+     */
+    suspend fun splitPdf(file: File, displayName: String, cuts: String): ByteArray =
+        withContext(Dispatchers.IO) {
+            val body = MultipartBody.Builder()
+                .setType(MultipartBody.FORM)
+                .addFormDataPart("cuts", cuts)
+                .addFormDataPart(
+                    "files",
+                    displayName,
+                    file.asRequestBody("application/pdf".toMediaType()),
+                )
+                .build()
+            val request = Request.Builder().url(endpoint("/api/split-a4")).post(body).build()
+            try {
+                client.newCall(request).execute().use { resp ->
+                    val bytes = resp.body?.bytes() ?: ByteArray(0)
+                    if (resp.code == 401) throw ApiException("登录已过期，请重新登录")
+                    if (!resp.isSuccessful) {
+                        throw ApiException(
+                            parseError(bytes.toString(Charsets.UTF_8)) ?: "拆分失败（HTTP ${resp.code}）"
+                        )
+                    }
+                    if (bytes.isEmpty()) throw ApiException("服务器未返回拆分结果")
+                    bytes
+                }
+            } catch (e: IOException) {
+                throw ApiException(ioMessage(e))
+            }
+        }
+
+    /**
+     * 查询打印量统计；非管理员或无权限时返回 null（界面上隐藏该卡片）。
+     *
+     * @return 统计数据或 null
+     */
+    suspend fun stats(): PrintStats? = withContext(Dispatchers.IO) {
+        val request = Request.Builder().url(endpoint("/api/stats")).get().build()
+        try {
+            client.newCall(request).execute().use { resp ->
+                if (!resp.isSuccessful) return@withContext null
+                val text = resp.body?.string().orEmpty()
+                if (text.isBlank()) return@withContext null
+                parseStats(JSONObject(text))
+            }
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    /**
+     * 解析统计接口返回的窗口数据。
+     *
+     * @param json 响应 JSON
+     * @return 统计数据
+     */
+    private fun parseStats(json: JSONObject): PrintStats {
+        val windows = json.optJSONObject("windows")
+            ?: return PrintStats(emptyBucket("今日"), emptyBucket("近 7 天"), emptyBucket("近 30 天"))
+
+        /**
+         * 读取单个窗口。
+         *
+         * @param key 窗口键
+         * @param fallback 缺省名称
+         * @return 统计桶
+         */
+        fun bucket(key: String, fallback: String): StatBucket {
+            val item = windows.optJSONObject(key) ?: return emptyBucket(fallback)
+            return StatBucket(
+                label = item.optString("label", fallback),
+                tasks = item.optInt("tasks"),
+                copies = item.optInt("copies"),
+                pages = item.optInt("pages"),
+                sheets = item.optInt("sheets"),
+            )
+        }
+
+        return PrintStats(
+            today = bucket("today", "今日"),
+            week = bucket("week", "近 7 天"),
+            month = bucket("month", "近 30 天"),
+        )
+    }
+
+    /**
+     * 构造空统计桶。
+     *
+     * @param label 窗口名称
+     * @return 统计桶
+     */
+    private fun emptyBucket(label: String) = StatBucket(label, 0, 0, 0, 0)
 
     /**
      * 执行返回 JSON 的写操作。
