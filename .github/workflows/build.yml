@@ -188,6 +188,21 @@ jobs:
         with:
           python-version: '3.13'
 
+      # 预装并缓存 Flutter SDK：Flet 会复用 ~/flutter/<版本>，避免每次重新下载约 2GB
+      - name: 预装 Flutter SDK
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.44.8'
+          channel: stable
+          cache: true
+
+      - name: 让 Flet 复用该 SDK
+        run: |
+          mkdir -p "$HOME/flutter"
+          FLUTTER_ROOT="$(cd "$(dirname "$(command -v flutter)")/.." && pwd)"
+          ln -sfn "$FLUTTER_ROOT" "$HOME/flutter/3.44.8"
+          "$HOME/flutter/3.44.8/bin/flutter" --version
+
       - name: 构建 .app 并制作 dmg
         run: bash tools/build_macos.sh
 
@@ -218,6 +233,29 @@ jobs:
         run: |
           xcodebuild -version
           pod --version || echo "CocoaPods 缺失，flet 构建时可能失败"
+
+      # 预装并缓存 Flutter SDK：Flet 会复用 ~/flutter/<版本>，避免每次重新下载约 2GB
+      - name: 预装 Flutter SDK
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.44.8'
+          channel: stable
+          cache: true
+
+      - name: 让 Flet 复用该 SDK
+        run: |
+          mkdir -p "$HOME/flutter"
+          FLUTTER_ROOT="$(cd "$(dirname "$(command -v flutter)")/.." && pwd)"
+          ln -sfn "$FLUTTER_ROOT" "$HOME/flutter/3.44.8"
+          "$HOME/flutter/3.44.8/bin/flutter" --version
+
+      - name: 缓存 pub 与 CocoaPods
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.pub-cache
+            ~/Library/Caches/CocoaPods
+          key: pub-pods-${{ runner.os }}-${{ runner.arch }}-3.44.8
 
       # 可选签名：在仓库 Secrets 中配置下列变量后自动产出已签名 IPA
       #   IOS_TEAM_ID / IOS_SIGNING_CERTIFICATE / IOS_PROVISIONING_PROFILE / IOS_EXPORT_METHOD
